@@ -463,10 +463,35 @@ def restore_claude(profile: str, registry: dict) -> str:
     return stored.get("email") or "unknown"
 
 
+def codex_token_expiry(blob: str) -> float | None:
+    """Seconds left on the id_token, which lives about an hour — far less than the
+    access token's ten days. A parked copy older than that is refused by the app."""
+    import base64
+
+    token = (json.loads(blob).get("tokens") or {}).get("id_token")
+    if not isinstance(token, str) or token.count(".") != 2:
+        return None
+    body = token.split(".")[1]
+    body += "=" * (-len(body) % 4)
+    try:
+        expiry = json.loads(base64.urlsafe_b64decode(body)).get("exp")
+    except (ValueError, json.JSONDecodeError):
+        return None
+    return None if not expiry else expiry - time.time()
+
+
 def restore_codex(profile: str, registry: dict) -> str:
     stored = registry["profiles"][profile]["codex"]
     source = CODEX_VAULT / f"{profile}.json"
-    atomic_write(CODEX_AUTH, source.read_text(encoding="utf-8"))
+    blob = source.read_text(encoding="utf-8")
+    left = codex_token_expiry(blob)
+    if left is not None and left <= 0:
+        note(
+            f"{profile}'s Codex sign-in expired {humanize_reset(int(time.time() - left))} ago — "
+            f"the CLI will refresh it, but ChatGPT.app will ask you to sign in until "
+            f"`accsw add codex` gives it a fresh one"
+        )
+    atomic_write(CODEX_AUTH, blob)
     registry.setdefault("active", {})["codex"] = profile
     return stored.get("email") or "unknown"
 
