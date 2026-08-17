@@ -173,15 +173,13 @@ quota_broken = {
 }
 check("prefers the account it could measure", accsw.best_profile(registry, quota_broken)[0], "eliza")
 
-print("an exhausted account ranks below one we simply could not read")
-reg2 = {"profiles": {"maxed": {"claude": {}}, "unknown": {"claude": {}}}, "active": {}}
-tiers = {("maxed", "claude"): [("Fable", 100.0, None)], ("unknown", "claude"): accsw.Fail("HTTP 429")}
-name_t, why_t = accsw.best_profile(reg2, tiers)
-check("unknown beats exhausted", name_t, "unknown")
-check_that("explains it is unreadable", "refreshes on first use" in why_t, why_t)
-check("a measured account with room still wins",
-      accsw.best_profile(reg2, {("maxed", "claude"): [("Fable", 10.0, None)],
-                                ("unknown", "claude"): accsw.Fail("x")})[0], "maxed")
+print("an account we could read beats one we could not, even when it is tight")
+reg2 = {"profiles": {"tight": {"claude": {}}, "unknown": {"claude": {}}}, "active": {}}
+tiers = {("tight", "claude"): [("Fable", 100.0, None)], ("unknown", "claude"): accsw.Fail("HTTP 429")}
+check("unreadable never wins", accsw.best_profile(reg2, tiers)[0], "tight")
+check("roomy still beats tight",
+      accsw.best_profile(reg2, {("tight", "claude"): [("Fable", 10.0, None)],
+                                ("unknown", "claude"): accsw.Fail("x")})[0], "tight")
 
 print("an unreadable account is ranked last, not discarded")
 name, why = accsw.best_profile(registry, {})

@@ -933,19 +933,17 @@ def best_profile(
         known = [margin for margin in margins if margin is not None]
         loaded = any(active.get(tool) == name for tool in tools)
         margin = min(known) if known else None
-        # An account measured at zero is worse than one we simply could not read:
-        # exhausted is a fact, unknown is only missing information.
-        tier = 2 if margin else (1 if margin is None else 0)
-        ranked.append((tier, margin or 0.0, loaded, name))
+        # Reachable first. An account whose quota cannot be read is also an account
+        # whose credential we could not prove works, and switching onto it is how a
+        # dead token reaches the slot.
+        ranked.append((0 if margin is None else 1, margin or 0.0, loaded, name))
     if not ranked:
         return None, "no account is captured for that tool"
     ranked.sort(key=lambda row: (-row[0], -row[1], not row[2], row[3]))
-    tier, margin, _, name = ranked[0]
-    if tier == 2:
+    measured, margin, _, name = ranked[0]
+    if measured:
         return name, f"{margin:.0f}% left in its tightest window"
-    if tier == 1:
-        return name, "quota unreadable; its token refreshes on first use"
-    return name, "every account is out of quota — this one is the least stale"
+    return name, "no account answered; this one's token refreshes on first use"
 
 
 def pick_profile(registry: dict) -> str | None:
@@ -1013,16 +1011,22 @@ def restart_app(name: str) -> None:
     run(["open", "-a", name])
 
 
-def settle_readers(tools: tuple[str, ...], restart: bool) -> None:
+def settle_readers(tools: tuple[str, ...], restart: bool, swapped: set[str]) -> None:
+    """Only bounce an app whose own session moved.
+
+    Restarting it for a credential its chat identity does not even use is pure
+    disruption — and quitting an app that was running on an expired in-memory
+    session is how you land on a login screen that goes nowhere.
+    """
     for tool in tools:
         name = GUI_APPS[tool]
-        if not app_running(name):
+        if not app_running(name) or tool not in swapped:
             continue
         if restart:
             restart_app(name)
             note(f"restarted {name}")
         else:
-            note(f"{name} keeps the old account until you quit and reopen it (--restart does it)")
+            note(f"{name} keeps the old session until you quit and reopen it")
     for tool in tools:
         if running(tool):
             note(f"open {tool} sessions keep the old account; new ones start on the new one")
@@ -1101,13 +1105,15 @@ def cmd_use(args) -> int:
         raise Fail(f"profile {args.profile!r} holds no account for {', '.join(wanted)}")
     warn_running(tools)
     switched = apply_switch(args.profile, tools, registry)
+    swapped = set()
     if "claude" in tools and switch_app_session(args.profile, registry):
         save_registry(registry)
         switched.append("Claude app: session swapped")
+        swapped.add("claude")
     print(f"switched to {args.profile!r}")
     for line in switched:
         print(f"  {line}")
-    settle_readers(tools, args.restart)
+    settle_readers(tools, args.restart, swapped)
     return 0
 
 
