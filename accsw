@@ -233,6 +233,40 @@ def set_claude_oauth_account(account: dict) -> None:
 # ------------------------------------------------------------------ capture
 
 
+def slugify(text: str) -> str:
+    cleaned = "".join(char if char.isalnum() else "-" for char in text.lower())
+    return "-".join(part for part in cleaned.split("-") if part)
+
+
+def derive_profile(registry: dict) -> tuple[str, str]:
+    """Name a profile after whichever account is logged in, so nothing has to be invented.
+
+    Claude wins when both are present: the two tools switch together, so the pair is
+    stored under one name rather than split across two.
+    """
+    for tool in TOOLS:
+        email = LIVE_IDENTITY[tool]()
+        if not email:
+            continue
+        local, _, domain = email.partition("@")
+        candidates = [slugify(local)]
+        if domain:
+            candidates.append(f"{slugify(local)}-{slugify(domain.split('.')[0])}")
+        for name in candidates:
+            owner = registry["profiles"].get(name, {}).get(tool, {}).get("email")
+            if owner is None or owner == email:
+                return name, email
+        base = candidates[-1]
+        suffix = 2
+        while f"{base}-{suffix}" in registry["profiles"]:
+            suffix += 1
+        return f"{base}-{suffix}", email
+    raise Fail(
+        "nothing is logged in — run `claude` or `codex login` first, "
+        "or name a profile explicitly"
+    )
+
+
 def guard_rebind(profile: str, tool: str, registry: dict, email: str | None, replace: bool) -> None:
     known = registry["profiles"].get(profile, {}).get(tool)
     if not known or replace:
@@ -488,7 +522,7 @@ def codex_quota(token: str) -> list[tuple[str, float, int | None]]:
 QUOTA = {"claude": claude_quota, "codex": codex_quota}
 
 
-def gather_quota(registry: dict) -> dict[tuple[str, str], object]:
+def gather_quota(registry: dict, tools: tuple[str, ...] = TOOLS) -> dict[tuple[str, str], object]:
     """Query every captured account, one at a time. Values are window lists or Fail.
 
     Sequential on purpose: a burst of simultaneous authenticated requests for several
@@ -497,7 +531,7 @@ def gather_quota(registry: dict) -> dict[tuple[str, str], object]:
     jobs = [
         (name, tool)
         for name, entry in registry["profiles"].items()
-        for tool in TOOLS
+        for tool in tools
         if tool in entry
     ]
     snapshot = {}
@@ -550,10 +584,37 @@ def format_quota(result) -> str:
     parts = []
     for label, percent, resets_at in result:
         left = 100.0 - effective_percent(percent, resets_at)
-        countdown = humanize_reset(resets_at)
-        suffix = f" resets {countdown}" if countdown else " reset"
-        parts.append(f"{label} {bar(left)} {left:>3.0f}% left{suffix}")
+        countdown = humanize_reset(resets_at) or "now"
+        parts.append(f"{label} {bar(left, 6)} {left:>3.0f}% {countdown}")
     return "   ".join(parts)
+
+
+def paint(text: str, code: str, enabled: bool) -> str:
+    return f"{ESC}[{code}m{text}{ESC}[0m" if enabled else text
+
+
+def remaining_colour(left: float) -> str:
+    if left >= 50:
+        return "32"
+    return "33" if left >= 20 else "31"
+
+
+def quota_lines(result, colour: bool) -> list[str]:
+    """One aligned line per window, coloured by how much is left."""
+    if isinstance(result, Fail):
+        return [paint(f"— {result}", "31", colour)]
+    if not result:
+        return ["— no window reported"]
+    lines = []
+    for label, percent, resets_at in result:
+        left = 100.0 - effective_percent(percent, resets_at)
+        countdown = humanize_reset(resets_at)
+        when = f"resets in {countdown}" if countdown else "just reset"
+        lines.append(
+            f"{label:<3} {paint(bar(left), remaining_colour(left), colour)} "
+            f"{left:>3.0f}% left   {paint(when, '2', colour)}"
+        )
+    return lines
 
 
 def headroom(result) -> float | None:
@@ -716,8 +777,29 @@ def guard_running(tools: tuple[str, ...], force: bool) -> None:
     )
 
 
+def apply_switch(profile: str, tools: tuple[str, ...], registry: dict) -> list[str]:
+    """Preflight every leg, then swap them one at a time, recording each as it lands."""
+    for tool in tools:
+        PREFLIGHT[tool](profile, registry)
+
+    outcome = []
+    for tool in tools:
+        if registry.get("active", {}).get(tool) == profile:
+            outcome.append(f"{tool}: already loaded")
+            continue
+        if stash_live(tool, registry):
+            save_registry(registry)
+        email = RESTORE[tool](profile, registry)
+        save_registry(registry)
+        outcome.append(f"{tool}: {email}")
+    return outcome
+
+
 def cmd_save(args) -> int:
     registry = load_registry()
+    if args.profile is None:
+        args.profile, discovered = derive_profile(registry)
+        print(f"found {discovered} logged in — capturing as {args.profile!r}")
     tools = selected_tools(args)
     saved = []
     skipped = []
@@ -753,25 +835,45 @@ def cmd_use(args) -> int:
         raise Fail(f"profile {args.profile!r} holds no account for {', '.join(wanted)}")
     guard_running(tools, args.force)
 
-    # Verify every leg before mutating any of them: a half-applied switch leaves the
-    # registry disagreeing with reality, with no rollback.
-    for tool in tools:
-        PREFLIGHT[tool](args.profile, registry)
-
-    switched = []
-    for tool in tools:
-        if registry.get("active", {}).get(tool) == args.profile:
-            switched.append(f"{tool}: already loaded")
-            continue
-        if stash_live(tool, registry):
-            save_registry(registry)
-        email = RESTORE[tool](args.profile, registry)
-        save_registry(registry)
-        switched.append(f"{tool}: {email}")
+    switched = apply_switch(args.profile, tools, registry)
     print(f"switched to {args.profile!r}")
     for line in switched:
         print(f"  {line}")
     return 0
+
+
+def cmd_run(args) -> int:
+    """Pick the roomiest account, switch to it, then become the tool."""
+    tool = args.tool_name
+    registry = load_registry()
+    binary = shutil.which(tool)
+    if binary is None:
+        raise Fail(f"{tool} is not on PATH")
+
+    pids = running(tool)
+    if pids:
+        # One global credential per tool means two live sessions cannot hold different
+        # accounts — whichever refreshes last wins for both. So never switch underneath one.
+        note(f"{tool} already running ({len(pids)}) — staying on the loaded account")
+    elif not registry["profiles"]:
+        note("no profiles captured yet — run `accsw save`")
+    else:
+        quota = gather_quota(registry, (tool,))
+        name, why = best_profile(registry, quota, (tool,))
+        if name is None:
+            note(f"{why} — staying on the loaded account")
+        elif registry.get("active", {}).get(tool) == name:
+            note(f"{tool} already on {name} — {why}")
+        else:
+            apply_switch(name, (tool,), registry)
+            note(f"switched {tool} to {name} — {why}")
+
+    os.execv(binary, [binary, *args.rest])
+
+
+def note(message: str) -> None:
+    """Chatter from the wrapper goes to stderr so it never pollutes piped output."""
+    print(f"accsw: {message}", file=sys.stderr)
 
 
 def cmd_list(args) -> int:
@@ -797,20 +899,27 @@ def cmd_list(args) -> int:
 def cmd_status(args) -> int:
     registry = load_registry()
     active = registry.get("active", {})
-    live = {"claude": claude_identity(), "codex": codex_identity()}
-    for tool in TOOLS:
-        email = live[tool] or "not logged in"
-        profile = active.get(tool)
-        suffix = f"  (profile {profile})" if profile else ""
-        pids = running(tool)
-        busy = f"  [{len(pids)} running]" if pids else ""
-        print(f"{tool:<7} {email}{suffix}{busy}")
-        if live[tool] is None:
+    colour = sys.stdout.isatty()
+    for position, tool in enumerate(TOOLS):
+        if position:
+            print()
+        live = LIVE_IDENTITY[tool]()
+        aside = []
+        if active.get(tool):
+            aside.append(active[tool])
+        if running(tool):
+            aside.append(f"{len(running(tool))} running")
+        tail = paint("   " + " · ".join(aside), "2", colour) if aside else ""
+        print(f"{tool:<7} {live or paint('not signed in', '2', colour)}{tail}")
+        if live is None:
             continue
         try:
-            print(f"        {format_quota(QUOTA[tool](live_token(tool)))}")
+            windows = QUOTA[tool](live_token(tool))
         except Fail as error:
-            print(f"        — {error}")
+            print(f"        {paint(f'— {error}', '31', colour)}")
+            continue
+        for line in quota_lines(windows, colour):
+            print(f"        {line}")
     return 0
 
 
@@ -862,7 +971,9 @@ def main() -> int:
     tool_flag = dict(choices=TOOLS, help="act on one tool only (default: both)")
 
     save = subparsers.add_parser("save", help="capture the currently logged-in account")
-    save.add_argument("profile")
+    save.add_argument(
+        "profile", nargs="?", help="omit to name it after whoever is logged in"
+    )
     save.add_argument("--tool", **tool_flag)
     save.add_argument(
         "--replace",
@@ -886,6 +997,13 @@ def main() -> int:
 
     status = subparsers.add_parser("status", help="show who is logged in, with quota")
     status.set_defaults(handler=cmd_status)
+
+    launch = subparsers.add_parser(
+        "run", help="pick the roomiest account, switch to it, then launch the tool"
+    )
+    launch.add_argument("tool_name", choices=TOOLS)
+    launch.add_argument("rest", nargs=argparse.REMAINDER, help="arguments passed through")
+    launch.set_defaults(handler=cmd_run)
 
     auto = subparsers.add_parser("auto", help="switch to the account with the most headroom")
     auto.add_argument("--tool", **tool_flag)

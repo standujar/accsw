@@ -19,9 +19,18 @@ switch account   ↑↓ move   ↵ select   a auto   q cancel
 `●` is the account currently loaded, `○` a captured one waiting. Arrows or `j`/`k` move, `↵` switches,
 `a` picks the roomiest account automatically, `q` backs out. Everything is also addressable directly:
 
+Or never think about it at all — launch through `run` and it lands on the roomiest account:
+
 ```
-accsw save perso          # snapshot whoever is logged in right now, call it "perso"
-accsw save eliza          # log into the other account once, snapshot it too
+accsw run claude          # picks the account with the most left, switches, launches claude
+accsw run codex exec "…"  # arguments pass straight through
+```
+
+Worth aliasing: `alias claude='accsw run claude'`.
+
+```
+accsw save                # capture whoever is signed in, named after their email
+accsw save perso          # ...or name it yourself
 accsw use perso           # switch both tools, no menu
 accsw use eliza --tool codex   # or just one
 accsw auto                # switch to whichever account has the most headroom
@@ -45,7 +54,13 @@ stored token is used to query its own usage, so you see every account's state wi
 Auto-selection has one rule, and it fits in a sentence: **pick the account whose most-constrained
 window is least used.** A tie keeps whatever is already loaded, so it never switches for nothing.
 Accounts whose token has expired are reported as such and never chosen — an expired token is
-refreshed by switching to that account once.
+refreshed by switching to that account once. A window past its reset counts as empty, whatever
+number was last recorded for it.
+
+`accsw run` applies that rule and then becomes the tool, so you never switch by hand. It will not
+switch while a session of that tool is already running, and that is a hard constraint rather than
+caution: each tool has exactly one credential slot, so two live sessions cannot hold different
+accounts — whichever refreshes its token last would win for both.
 
 ## How it works
 
@@ -122,7 +137,7 @@ macOS, Python 3. No third-party packages.
 ## Tests
 
 ```
-python3 tests/test_quota.py     # 47 checks — window parsing, rollover, hex, auto-selection
+python3 tests/test_quota.py     # 66 checks — parsing, rollover, hex, naming, selection, display
 python3 tests/test_picker.py    # 11 checks — the picker driven through a real pty
 ```
 

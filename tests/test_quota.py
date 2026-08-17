@@ -153,10 +153,54 @@ check("headroom follows the rollover", accsw.headroom([("7d", 99.0, now - 60)]),
 print("format_quota reports what is LEFT, and surfaces failures verbatim")
 check("error text shown", accsw.format_quota(accsw.Fail("token expired")), "— token expired")
 check_that(
-    "window line reads as remaining",
-    accsw.format_quota([("5h", 38.0, now + 2 * HOUR)]) == "5h ██████░░░░  62% left resets 2h",
+    "compact picker line reads as remaining",
+    accsw.format_quota([("5h", 38.0, now + 2 * HOUR)]) == "5h ████░░  62% 2h",
     accsw.format_quota([("5h", 38.0, now + 2 * HOUR)]),
 )
+
+print("status lines are aligned, one per window, and colour-free when not a terminal")
+lines = accsw.quota_lines([("5h", 38.0, now + 2 * HOUR), ("7d", 90.0, now + 3 * DAY)], False)
+check("one line per window", len(lines), 2)
+check("first line", lines[0], "5h  ██████░░░░  62% left   resets in 2h")
+check("second line", lines[1], "7d  █░░░░░░░░░  10% left   resets in 3d")
+check_that("no escape codes without a terminal", ESC not in "".join(lines) if (ESC := "\x1b") else False)
+check("a just-reset window says so", accsw.quota_lines([("7d", 90.0, None)], False)[0].endswith("just reset"), True)
+
+print("profiles name themselves after whoever is logged in")
+check("simple local part", accsw.slugify("developer"), "developer")
+check("dots and plus become dashes", accsw.slugify("stan.andujar+work"), "stan-andujar-work")
+check("collapses runs and trims", accsw.slugify("--Stan__Test--"), "stan-test")
+
+empty = {"profiles": {}, "active": {}}
+accsw.LIVE_IDENTITY = {"claude": lambda: "developer@elizalabs.ai", "codex": lambda: None}
+check("named from the local part", accsw.derive_profile(empty), ("developer", "developer@elizalabs.ai"))
+
+print("claude wins when both are signed in, so the pair stays under one name")
+accsw.LIVE_IDENTITY = {"claude": lambda: "a@work.com", "codex": lambda: "b@gmail.com"}
+check("claude decides the name", accsw.derive_profile(empty)[0], "a")
+
+print("a name already owned by a different account gets qualified, never stolen")
+taken = {"profiles": {"stan": {"claude": {"email": "stan@gmail.com"}}}, "active": {}}
+accsw.LIVE_IDENTITY = {"claude": lambda: "stan@outlook.com", "codex": lambda: None}
+check("qualified by domain", accsw.derive_profile(taken)[0], "stan-outlook")
+accsw.LIVE_IDENTITY = {"claude": lambda: "stan@gmail.com", "codex": lambda: None}
+check("same account reuses its profile", accsw.derive_profile(taken)[0], "stan")
+
+print("nothing signed in is an error, not a guess")
+accsw.LIVE_IDENTITY = {"claude": lambda: None, "codex": lambda: None}
+try:
+    accsw.derive_profile(empty)
+    check_that("raises when nothing is signed in", False, "no exception")
+except accsw.Fail as error:
+    check_that("raises when nothing is signed in", "nothing is logged in" in str(error), str(error))
+
+print("colour tracks how much is left")
+check("plenty is green", accsw.remaining_colour(80.0), "32")
+check("half is green", accsw.remaining_colour(50.0), "32")
+check("getting low is amber", accsw.remaining_colour(35.0), "33")
+check("nearly out is red", accsw.remaining_colour(5.0), "31")
+check_that("colour is applied when enabled", "\x1b[32m" in accsw.quota_lines([("5h", 10.0, None)], True)[0])
+check("paint is inert when disabled", accsw.paint("x", "32", False), "x")
 
 print("hex detection guards the keychain round-trip")
 check("json is not hex", accsw.looks_hex('{"a":1}'), False)
