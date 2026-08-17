@@ -287,21 +287,6 @@ def name_for(email: str, tool: str, registry: dict) -> str:
     return f"{base}-{suffix}"
 
 
-def derive_profile(registry: dict) -> tuple[str, str]:
-    """Name a profile after whichever account is logged in, so nothing has to be invented.
-
-    Claude wins when both are present: the two tools switch together, so the pair is
-    stored under one name rather than split across two.
-    """
-    for tool in TOOLS:
-        email = LIVE_IDENTITY[tool]()
-        if email:
-            return name_for(email, tool, registry), email
-    raise Fail(
-        "nothing is logged in — run `claude` or `codex login` first, "
-        "or name a profile explicitly"
-    )
-
 
 def live_blob(tool: str) -> str | None:
     if tool == "claude":
@@ -751,11 +736,6 @@ def profile_token(tool: str, profile: str) -> str:
     return codex_access_token(read_file(CODEX_VAULT / f"{profile}.json"))
 
 
-def live_token(tool: str) -> str:
-    if tool == "claude":
-        return claude_access_token(keychain_read(CLAUDE_KEYCHAIN_SERVICE))
-    return codex_access_token(read_file(CODEX_AUTH))
-
 
 def claude_oauth_identity(token: str) -> dict:
     """Ask the API whose credential this is, rather than making the user type it."""
@@ -965,11 +945,6 @@ def quota_lines(result, colour: bool) -> list[str]:
     return lines
 
 
-def headroom(result) -> float | None:
-    """Free capacity in the most-constrained window. None when unknown."""
-    tightest = binding_window(result)
-    return None if tightest is None else tightest[1]
-
 
 # Which windows decide, and in what order. Claude is asked for Fable first because
 # that is the limit that actually stops work here; Codex reports one window and it
@@ -1028,14 +1003,6 @@ def deciding_window(result, tool: str) -> tuple[str, float] | None:
             return label, left[label]
     return min(left.items(), key=lambda item: item[1])
 
-
-def binding_window(result) -> tuple[str, float] | None:
-    """The window that limits this account, and what is left in it — named, because
-    "0% left" reads as a dead account when only one model-scoped window is spent."""
-    if isinstance(result, Fail) or not result:
-        return None
-    worst = max(result, key=lambda window: effective_percent(window[1], window[2]))
-    return worst[0], 100.0 - effective_percent(worst[1], worst[2])
 
 
 # ------------------------------------------------------------------- picker
@@ -1108,7 +1075,6 @@ GUI_APPS = {"claude": "Claude", "codex": "ChatGPT"}
 # ungated, and holds no single-instance lock. So each account gets its own profile
 # and stays signed in there — nothing to swap, nothing to identify.
 CLAUDE_APP_DATA = STORE / "claude-app"
-CLAUDE_APP_CONFIG = STORE / "claude-config"
 CLAUDE_BINARY = Path("/Applications/Claude.app/Contents/MacOS/Claude")
 
 
@@ -1228,22 +1194,6 @@ def settle_readers(
         if running(tool):
             note(f"open {tool} sessions keep the old account; new ones start on the new one")
 
-
-def warn_running(tools: tuple[str, ...]) -> None:
-    """Warn, never block.
-
-    IDE extensions keep a host process alive for as long as the editor is open, so
-    "is it running" is nearly always yes and a hard block would just train you to
-    bypass it. The real consequence is bounded: a live session keeps working on its
-    in-memory token, but when it refreshes it rewrites the shared credential slot, so
-    the next process to start may pick up the account you just switched away from.
-    """
-    busy = {tool: running(tool) for tool in tools}
-    busy = {tool: pids for tool, pids in busy.items() if pids}
-    if not busy:
-        return
-    listed = ", ".join(f"{len(pids)} {tool}" for tool, pids in busy.items())
-    note(f"{listed} already running — they may rewrite the slot when their token refreshes")
 
 
 def apply_switch(profile: str, tools: tuple[str, ...], registry: dict) -> list[str]:

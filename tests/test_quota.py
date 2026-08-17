@@ -83,7 +83,6 @@ accsw.http_get_json = lambda url, token: {
 windows = accsw.claude_quota("token")
 check("unscoped windows get short names", [w[0] for w in windows][:2], ["5h", "7d"])
 check("the scoped one is named after its model", windows[2][0], "Fable")
-check("a maxed model leaves no headroom", accsw.headroom(windows), 0.0)
 
 print("a model-scoped limit is what auto-select must see")
 registry_scoped = {"profiles": {"fresh": {"claude": {}}, "maxed": {"claude": {}}}, "active": {}}
@@ -117,15 +116,10 @@ accsw.http_get_json = lambda url, token: {
 windows = accsw.codex_quota("token")
 check("only the reported window", [label for label, _, _ in windows], ["7d"])
 check("exhausted account reads 100 used", windows[0][1], 100.0)
-check("no headroom left", accsw.headroom(windows), 0.0)
 
 print("a payload with no rate_limit yields no windows rather than a wrong gauge")
 accsw.http_get_json = lambda url, token: {"plan_type": "pro"}
 check("no windows", accsw.codex_quota("token"), [])
-
-print("the binding window is named, so a spent model does not read as a dead account")
-check("names the worst window", accsw.binding_window([("5h", 2.0, None), ("Fable", 100.0, None)]), ("Fable", 0.0))
-check("unknown has no binding window", accsw.binding_window(accsw.Fail("x")), None)
 
 print("claude is chosen on Fable first, then 5h, then the week")
 prio = {"profiles": {"a": {"claude": {}}, "b": {"claude": {}}}, "active": {}}
@@ -231,11 +225,6 @@ check("expiry is read from expiresAt in milliseconds",
       10)
 check("a blob with no expiry has none", accsw.claude_token_expiry('{"claudeAiOauth": {}}'), None)
 
-print("headroom is free capacity in the tightest window")
-check("tightest wins", accsw.headroom([("5h", 38.0, None), ("7d", 71.5, None)]), 28.5)
-check("errors have no headroom", accsw.headroom(accsw.Fail("expired")), None)
-check("empty has no headroom", accsw.headroom([]), None)
-
 print("best_profile picks the most headroom")
 registry = {
     "profiles": {
@@ -301,7 +290,6 @@ print("a window past its reset has rolled over, whatever the stored number said"
 check("future window keeps its number", accsw.effective_percent(38.0, now + HOUR), 38.0)
 check("expired window reads as empty", accsw.effective_percent(99.0, now - 60), 0.0)
 check("unknown reset keeps its number", accsw.effective_percent(38.0, None), 38.0)
-check("headroom follows the rollover", accsw.headroom([("7d", 99.0, now - 60)]), 100.0)
 
 print("failures are surfaced verbatim")
 check("error text shown", accsw.quota_lines(accsw.Fail("token expired"), False), ["— token expired"])
@@ -314,33 +302,21 @@ check("second line", lines[1], "7d █░░░░░░░░░  10% left   re
 check_that("no escape codes without a terminal", ESC not in "".join(lines) if (ESC := "\x1b") else False)
 check("a just-reset window says so", accsw.quota_lines([("7d", 90.0, None)], False)[0].endswith("just reset"), True)
 
-print("profiles name themselves after whoever is logged in")
+print("profiles are named after the account, and a name is never stolen")
 check("simple local part", accsw.slugify("developer"), "developer")
 check("dots and plus become dashes", accsw.slugify("stan.andujar+work"), "stan-andujar-work")
 check("collapses runs and trims", accsw.slugify("--Stan__Test--"), "stan-test")
 
 empty = {"profiles": {}, "active": {}}
-accsw.LIVE_IDENTITY = {"claude": lambda: "developer@elizalabs.ai", "codex": lambda: None}
-check("named from the local part", accsw.derive_profile(empty), ("developer", "developer@elizalabs.ai"))
+check("named from the local part",
+      accsw.name_for("developer@elizalabs.ai", "claude", empty), "developer")
 
-print("claude wins when both are signed in, so the pair stays under one name")
-accsw.LIVE_IDENTITY = {"claude": lambda: "a@work.com", "codex": lambda: "b@gmail.com"}
-check("claude decides the name", accsw.derive_profile(empty)[0], "a")
-
-print("a name already owned by a different account gets qualified, never stolen")
 taken = {"profiles": {"stan": {"claude": {"email": "stan@gmail.com"}}}, "active": {}}
-accsw.LIVE_IDENTITY = {"claude": lambda: "stan@outlook.com", "codex": lambda: None}
-check("qualified by domain", accsw.derive_profile(taken)[0], "stan-outlook")
-accsw.LIVE_IDENTITY = {"claude": lambda: "stan@gmail.com", "codex": lambda: None}
-check("same account reuses its profile", accsw.derive_profile(taken)[0], "stan")
+check("a name held by another account is qualified by domain",
+      accsw.name_for("stan@outlook.com", "claude", taken), "stan-outlook")
+check("the same account reuses its own profile",
+      accsw.name_for("stan@gmail.com", "claude", taken), "stan")
 
-print("nothing signed in is an error, not a guess")
-accsw.LIVE_IDENTITY = {"claude": lambda: None, "codex": lambda: None}
-try:
-    accsw.derive_profile(empty)
-    check_that("raises when nothing is signed in", False, "no exception")
-except accsw.Fail as error:
-    check_that("raises when nothing is signed in", "nothing is logged in" in str(error), str(error))
 
 print("colour tracks how much is left")
 check("plenty is green", accsw.remaining_colour(80.0), "32")
