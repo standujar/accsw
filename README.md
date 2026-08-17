@@ -20,7 +20,9 @@ git clone https://github.com/standujar/accsw.git
 ln -s "$PWD/accsw/accsw" ~/.local/bin/accsw
 ```
 
-## The four commands
+## What you can run
+
+Three verbs, and two switches for the background agent. That is the whole surface.
 
 ```
 accsw              go to the account with the most left
@@ -28,14 +30,15 @@ accsw status       every account: what is left, when it comes back
 accsw list         which accounts are captured
 accsw add claude   sign in to another account, without logging out of this one
 accsw add codex
-accsw --renew      refresh every sign-in without switching anything
-accsw --agent on   install the hourly renewal agent   (--agent off removes it)
 ```
 
-`→` means it moved you, `·` means it was already there.
+```
+accsw --renew      refresh every sign-in, switch nothing        (repairs a stale account)
+accsw --agent on   run that hourly in the background            (--agent off removes it)
+```
 
-`--renew` is what repairs a stale account, and what the background agent runs. It never switches, never
-opens an app, and never asks you to log in — it trades each idle refresh token for a fresh one.
+In the output, `→` means it moved you and `·` means you were already there. `--renew` never switches,
+never opens an app and never asks you to log in — it trades each idle refresh token for a fresh one.
 
 ## Why it does not lapse
 
