@@ -826,9 +826,17 @@ def quota_lines(result, colour: bool) -> list[str]:
 
 def headroom(result) -> float | None:
     """Free capacity in the most-constrained window. None when unknown."""
+    tightest = binding_window(result)
+    return None if tightest is None else tightest[1]
+
+
+def binding_window(result) -> tuple[str, float] | None:
+    """The window that limits this account, and what is left in it — named, because
+    "0% left" reads as a dead account when only one model-scoped window is spent."""
     if isinstance(result, Fail) or not result:
         return None
-    return 100.0 - max(effective_percent(percent, at) for _, percent, at in result)
+    worst = max(result, key=lambda window: effective_percent(window[1], window[2]))
+    return worst[0], 100.0 - effective_percent(worst[1], worst[2])
 
 
 # ------------------------------------------------------------------- picker
@@ -924,15 +932,18 @@ def best_profile(
     skipping it outright meant a perfectly usable account could never be chosen.
     """
     active = registry.get("active", {})
+    labels: dict[str, str | None] = {}
     ranked = []
     for name, entry in registry["profiles"].items():
         relevant = [tool for tool in tools if tool in entry]
         if not relevant:
             continue
-        margins = [headroom(quota.get((name, tool))) for tool in relevant]
-        known = [margin for margin in margins if margin is not None]
+        bindings = [binding_window(quota.get((name, tool))) for tool in relevant]
+        known = [item for item in bindings if item is not None]
         loaded = any(active.get(tool) == name for tool in tools)
-        margin = min(known) if known else None
+        tightest = min(known, key=lambda item: item[1]) if known else None
+        margin = tightest[1] if tightest else None
+        labels[name] = tightest[0] if tightest else None
         # Reachable first. An account whose quota cannot be read is also an account
         # whose credential we could not prove works, and switching onto it is how a
         # dead token reaches the slot.
@@ -942,7 +953,7 @@ def best_profile(
     ranked.sort(key=lambda row: (-row[0], -row[1], not row[2], row[3]))
     measured, margin, _, name = ranked[0]
     if measured:
-        return name, f"{margin:.0f}% left in its tightest window"
+        return name, f"{labels[name]} at {margin:.0f}% left"
     return name, "no account answered; this one's token refreshes on first use"
 
 
@@ -1194,21 +1205,34 @@ def cmd_status(args) -> int:
 
 
 def cmd_auto(args) -> int:
+    """Choose per tool. The two credential slots are independent, and an account that
+    only exists for one of them must never decide the other."""
     registry = load_state()
     if not registry["profiles"]:
-        raise Fail("no profiles yet — capture the current login with `accsw save <name>`")
+        raise Fail("no accounts captured yet — log in to one and run accsw")
     tools = selected_tools(args)
-    quota = gather_quota(registry)
-    name, why = best_profile(registry, quota, tools)
-    if name is None:
-        raise Fail(why)
-    active = registry.get("active", {})
-    if all(active.get(tool) == name for tool in tools if tool in registry["profiles"][name]):
-        print(f"already on {name!r} — {why}")
+    quota = gather_quota(registry, tools)
+    moved = False
+    for tool in tools:
+        name, why = best_profile(registry, quota, (tool,))
+        if name is None:
+            note(f"{tool}: {why}")
+            continue
+        if registry.get("active", {}).get(tool) == name:
+            print(f"{tool}: staying on {name} — {why}")
+            continue
+        for line in apply_switch(name, (tool,), registry):
+            print(f"{tool}: {line}")
+        print(f"  → {name}, {why}")
+        moved = True
+        swapped = set()
+        if tool == "claude" and switch_app_session(name, registry):
+            save_registry(registry)
+            swapped.add("claude")
+        settle_readers((tool,), args.restart, swapped)
+    if not moved:
         return 0
-    args.profile = name
-    print(f"auto-picked {name!r} — {why}")
-    return cmd_use(args)
+    return 0
 
 
 def cmd_rm(args) -> int:

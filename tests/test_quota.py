@@ -122,6 +122,10 @@ accsw.http_get_json = lambda url, token: {"plan_type": "pro"}
 check("no windows", accsw.codex_quota("token"), [])
 check("formatted as a notice", accsw.format_quota([]), "— no window reported")
 
+print("the binding window is named, so a spent model does not read as a dead account")
+check("names the worst window", accsw.binding_window([("5h", 2.0, None), ("Fable", 100.0, None)]), ("Fable", 0.0))
+check("unknown has no binding window", accsw.binding_window(accsw.Fail("x")), None)
+
 print("headroom is free capacity in the tightest window")
 check("tightest wins", accsw.headroom([("5h", 38.0, None), ("7d", 71.5, None)]), 28.5)
 check("errors have no headroom", accsw.headroom(accsw.Fail("expired")), None)
@@ -143,7 +147,7 @@ quota = {
 }
 name, why = accsw.best_profile(registry, quota)
 check("picks the roomier account", name, "perso")
-check_that("explains itself", "left in its tightest window" in why, why)
+check_that("names the binding window", why == "7d at 80% left", why)
 
 print("best_profile honours --tool instead of mixing both")
 tool_split = {
