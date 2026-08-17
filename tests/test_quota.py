@@ -207,6 +207,17 @@ check("an empty slot loads nothing, whatever the record says",
 accsw.CODEX_AUTH.write_text('{"tokens": {"id_token": "b"}}')
 check("the slot names its real owner", accsw.actually_loaded("codex", reg_live), "two")
 
+print("codex sign-ins are renewed rather than left to expire")
+check("a credential with no refresh token cannot be renewed",
+      accsw.refresh_codex('{"tokens": {"id_token": "x"}}'), None)
+try:
+    accsw.refresh_codex('{"tokens": {"refresh_token": "r"}}')
+    check_that("renewal obeys the offline guard", False, "it made a call")
+except accsw.Fail as error:
+    check_that("renewal obeys the offline guard", "offline" in str(error), str(error))
+check("an id_token an hour old is treated as due",
+      accsw.codex_token_expiry('{"tokens": {"id_token": "not.a.jwt"}}'), None)
+
 print("headroom is free capacity in the tightest window")
 check("tightest wins", accsw.headroom([("5h", 38.0, None), ("7d", 71.5, None)]), 28.5)
 check("errors have no headroom", accsw.headroom(accsw.Fail("expired")), None)

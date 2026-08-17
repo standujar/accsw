@@ -463,6 +463,54 @@ def restore_claude(profile: str, registry: dict) -> str:
     return stored.get("email") or "unknown"
 
 
+CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
+CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+
+
+def refresh_codex(blob: str) -> str | None:
+    """Trade the refresh token for a fresh set. Returns None if the grant is dead.
+
+    The refresh token rotates, so the result must replace BOTH the parked copy and
+    the live slot: keeping an old one around leaves a credential that looks valid
+    and is not.
+    """
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    if os.environ.get("ACCSW_OFFLINE") == "1":
+        raise Fail("offline: refused to call auth.openai.com")
+    payload = json.loads(blob)
+    tokens = payload.get("tokens") or {}
+    if not tokens.get("refresh_token"):
+        return None
+    body = urllib.parse.urlencode(
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": tokens["refresh_token"],
+            "client_id": CODEX_CLIENT_ID,
+        }
+    ).encode()
+    request = urllib.request.Request(
+        CODEX_TOKEN_URL,
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
+            granted = json.loads(response.read())
+    except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError):
+        return None
+    for field in ("id_token", "access_token", "refresh_token"):
+        if granted.get(field):
+            tokens[field] = granted[field]
+    payload["tokens"] = tokens
+    payload["last_refresh"] = (
+        __import__("datetime").datetime.now(__import__("datetime").UTC).isoformat()
+    )
+    return json.dumps(payload, indent=2)
+
+
 def codex_token_expiry(blob: str) -> float | None:
     """Seconds left on the id_token, which lives about an hour — far less than the
     access token's ten days. A parked copy older than that is refused by the app."""
@@ -485,12 +533,19 @@ def restore_codex(profile: str, registry: dict) -> str:
     source = CODEX_VAULT / f"{profile}.json"
     blob = source.read_text(encoding="utf-8")
     left = codex_token_expiry(blob)
-    if left is not None and left <= 0:
-        note(
-            f"{profile}'s Codex sign-in expired {humanize_reset(int(time.time() - left))} ago — "
-            f"the CLI will refresh it, but ChatGPT.app will ask you to sign in until "
-            f"`accsw add codex` gives it a fresh one"
-        )
+    if left is not None and left <= 300:
+        renewed = refresh_codex(blob)
+        if renewed is None:
+            note(
+                f"{profile}'s Codex sign-in has expired and could not be renewed — "
+                "`accsw add codex` will sign it in again"
+            )
+        else:
+            # Both copies, together: the old refresh token is dead the moment this
+            # succeeds, so leaving either one behind strands the account.
+            atomic_write(source, renewed)
+            blob = renewed
+            note(f"renewed {profile}'s Codex sign-in")
     atomic_write(CODEX_AUTH, blob)
     registry.setdefault("active", {})["codex"] = profile
     return stored.get("email") or "unknown"
