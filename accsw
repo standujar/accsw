@@ -3,10 +3,14 @@
 
 Each account is captured once, then switching is a state swap:
 
-  claude  credential lives in the macOS keychain under a service name keyed to
-          the macOS user, so it is global — CLAUDE_CONFIG_DIR does not isolate
-          it. We park each account's blob in its own keychain item and copy the
-          wanted one back into the canonical item.
+  claude  credential lives in the macOS keychain. The service name is
+          "Claude Code-credentials", optionally suffixed with the first 8 hex of
+          sha256(CLAUDE_CONFIG_DIR) — so a config dir DOES namespace it, but with
+          both CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR unset there
+          is exactly one global item. We park each account's blob in its own
+          keychain item and copy the wanted one back into the canonical one.
+          The plaintext .credentials.json backend exists in the binary but is
+          unreachable on macOS: a successful keychain write deletes that file.
   codex   credential is $CODEX_HOME/auth.json, a plain file. We keep one copy
           per account and write the wanted one back.
 
@@ -23,6 +27,7 @@ import pwd
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -49,6 +54,9 @@ class Fail(Exception):
 # ---------------------------------------------------------------- primitives
 
 
+ITEM_NOT_FOUND = 44
+
+
 def run(command: list[str], *, stdin: str | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         command,
@@ -59,70 +67,114 @@ def run(command: list[str], *, stdin: str | None = None) -> subprocess.Completed
     )
 
 
-def keychain_read(service: str) -> str | None:
-    result = run(
-        [
-            "security",
-            "find-generic-password",
-            "-s",
-            service,
-            "-a",
-            CLAUDE_KEYCHAIN_ACCOUNT,
-            "-w",
-        ]
+def atomic_write(path: Path, data: str, mode: int = 0o600) -> None:
+    """Write through a sibling temp file: never truncate the target, never widen it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, staged = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        os.fchmod(handle, mode)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(staged, path)
+    except BaseException:
+        Path(staged).unlink(missing_ok=True)
+        raise
+
+
+def looks_hex(text: str) -> bool:
+    return (
+        not text.startswith("{")
+        and len(text) % 2 == 0
+        and bool(text)
+        and all(char in "0123456789abcdef" for char in text)
     )
-    if result.returncode != 0:
+
+
+def keychain_read(service: str) -> str | None:
+    """None means the item is genuinely absent; anything else that went wrong raises."""
+    result = run(
+        ["security", "find-generic-password", "-s", service, "-a", CLAUDE_KEYCHAIN_ACCOUNT, "-w"]
+    )
+    if result.returncode == ITEM_NOT_FOUND:
         return None
-    return result.stdout.strip() or None
+    if result.returncode != 0:
+        raise Fail(
+            f"keychain read failed for {service} (exit {result.returncode}): "
+            f"{result.stderr.strip()}"
+        )
+    secret = result.stdout.strip()
+    if not secret:
+        return None
+    # `security -w` prints hex whenever the stored bytes are not printable ASCII.
+    if looks_hex(secret):
+        try:
+            return bytes.fromhex(secret).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            raise Fail(f"keychain item {service} is not decodable UTF-8")
+    return secret
 
 
 def keychain_write(service: str, secret: str, label: str) -> None:
-    result = run(
-        [
-            "security",
-            "add-generic-password",
-            "-U",
-            "-s",
-            service,
-            "-a",
-            CLAUDE_KEYCHAIN_ACCOUNT,
-            "-l",
-            label,
-            "-w",
-            secret,
-        ]
+    """Written as hex through stdin, so the secret never appears in any argument list."""
+    command = (
+        f'add-generic-password -U -a "{CLAUDE_KEYCHAIN_ACCOUNT}" -s "{service}" '
+        f'-l "{label}" -X {secret.encode("utf-8").hex()}\n'
     )
+    result = run(["security", "-i"], stdin=command)
     if result.returncode != 0:
         raise Fail(f"keychain write failed for {service}: {result.stderr.strip()}")
+    written = keychain_read(service)
+    if written != secret:
+        raise Fail(f"keychain write for {service} did not round-trip; nothing was switched")
 
 
 def keychain_delete(service: str) -> None:
-    run(
-        [
-            "security",
-            "delete-generic-password",
-            "-s",
-            service,
-            "-a",
-            CLAUDE_KEYCHAIN_ACCOUNT,
-        ]
-    )
+    """Loop: a service can hold duplicates, and a silent failure would strand a token."""
+    while True:
+        result = run(
+            [
+                "security",
+                "delete-generic-password",
+                "-s",
+                service,
+                "-a",
+                CLAUDE_KEYCHAIN_ACCOUNT,
+            ]
+        )
+        if result.returncode == ITEM_NOT_FOUND:
+            return
+        if result.returncode != 0:
+            raise Fail(
+                f"keychain delete failed for {service} (exit {result.returncode}): "
+                f"{result.stderr.strip()}"
+            )
 
 
 def profile_service(profile: str) -> str:
     return f"accsw-claude-{profile}"
 
 
+def read_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise Fail(f"{path} is not valid JSON: {error}")
+    except OSError as error:
+        raise Fail(f"cannot read {path}: {error}")
+
+
 def load_registry() -> dict:
     if not REGISTRY.is_file():
         return {"profiles": {}, "active": {}}
-    return json.loads(REGISTRY.read_text(encoding="utf-8"))
+    return read_json(REGISTRY)
 
 
 def save_registry(registry: dict) -> None:
     STORE.mkdir(parents=True, exist_ok=True)
-    REGISTRY.write_text(json.dumps(registry, indent=2) + "\n", encoding="utf-8")
-    REGISTRY.chmod(0o600)
+    STORE.chmod(0o700)
+    atomic_write(REGISTRY, json.dumps(registry, indent=2) + "\n")
 
 
 def running(tool: str) -> list[int]:
@@ -138,23 +190,17 @@ def running(tool: str) -> list[int]:
 
 
 def claude_identity() -> str | None:
-    if not CLAUDE_STATE.is_file():
-        return None
-    account = json.loads(CLAUDE_STATE.read_text(encoding="utf-8")).get("oauthAccount")
-    if not isinstance(account, dict):
-        return None
-    return account.get("emailAddress")
+    account = claude_oauth_account()
+    return account.get("emailAddress") if account else None
 
 
 def codex_identity() -> str | None:
     """Read the email claim out of the stored id_token. The token is never printed."""
     if not CODEX_AUTH.is_file():
         return None
-    try:
-        payload = json.loads(CODEX_AUTH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
-    token = payload.get("tokens", {}).get("id_token") or payload.get("id_token")
+    payload = read_json(CODEX_AUTH)
+    # `tokens` is present but null in API-key mode, so `.get("tokens", {})` is not enough.
+    token = (payload.get("tokens") or {}).get("id_token") or payload.get("id_token")
     if not isinstance(token, str) or token.count(".") != 2:
         return None
     import base64
@@ -171,92 +217,142 @@ def codex_identity() -> str | None:
 def claude_oauth_account() -> dict | None:
     if not CLAUDE_STATE.is_file():
         return None
-    account = json.loads(CLAUDE_STATE.read_text(encoding="utf-8")).get("oauthAccount")
+    account = read_json(CLAUDE_STATE).get("oauthAccount")
     return account if isinstance(account, dict) else None
 
 
-def set_claude_oauth_account(account: dict | None) -> None:
+def set_claude_oauth_account(account: dict) -> None:
     """Rewrite only the oauthAccount key; the rest of .claude.json is workspace state."""
     if not CLAUDE_STATE.is_file():
-        return
-    state = json.loads(CLAUDE_STATE.read_text(encoding="utf-8"))
-    if account is None:
-        state.pop("oauthAccount", None)
-    else:
-        state["oauthAccount"] = account
-    # Written through a sibling temp file: a crash mid-write must never truncate
-    # the 91 KB of workspace state Claude Code keeps in here.
-    staged = CLAUDE_STATE.with_name(CLAUDE_STATE.name + ".accsw-tmp")
-    staged.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
-    staged.chmod(0o600)
-    os.replace(staged, CLAUDE_STATE)
+        raise Fail(f"{CLAUDE_STATE} does not exist — run Claude Code once before switching")
+    state = read_json(CLAUDE_STATE)
+    state["oauthAccount"] = account
+    atomic_write(CLAUDE_STATE, json.dumps(state, indent=2) + "\n")
 
 
 # ------------------------------------------------------------------ capture
 
 
-def capture_claude(profile: str, registry: dict) -> str:
+def guard_rebind(profile: str, tool: str, registry: dict, email: str | None, replace: bool) -> None:
+    known = registry["profiles"].get(profile, {}).get(tool)
+    if not known or replace:
+        return
+    if known.get("email") and email and known["email"] != email:
+        raise Fail(
+            f"profile {profile!r} holds {known['email']} for {tool}, but {email} is logged in "
+            "— pass --replace to rebind it"
+        )
+
+
+def capture_claude(profile: str, registry: dict, replace: bool = False) -> str:
     secret = keychain_read(CLAUDE_KEYCHAIN_SERVICE)
     if secret is None:
         raise Fail(
             "no Claude Code credential in the keychain — run `claude` and log in first"
         )
+    account = claude_oauth_account()
+    if account is None:
+        raise Fail(
+            "Claude Code has no oauthAccount in ~/.claude.json — start it once before capturing"
+        )
+    email = account.get("emailAddress")
+    guard_rebind(profile, "claude", registry, email, replace)
     keychain_write(profile_service(profile), secret, f"accsw claude — {profile}")
     entry = registry["profiles"].setdefault(profile, {})
-    entry["claude"] = {
-        "email": claude_identity(),
-        "oauthAccount": claude_oauth_account(),
-    }
+    entry["claude"] = {"email": email, "oauthAccount": account}
     registry.setdefault("active", {})["claude"] = profile
-    return entry["claude"]["email"] or "unknown"
+    return email or "unknown"
 
 
-def capture_codex(profile: str, registry: dict) -> str:
+def capture_codex(profile: str, registry: dict, replace: bool = False) -> str:
     if not CODEX_AUTH.is_file():
         raise Fail(f"no Codex credential at {CODEX_AUTH} — run `codex login` first")
+    email = codex_identity()
+    guard_rebind(profile, "codex", registry, email, replace)
     CODEX_VAULT.mkdir(parents=True, exist_ok=True)
     CODEX_VAULT.chmod(0o700)
-    target = CODEX_VAULT / f"{profile}.json"
-    shutil.copyfile(CODEX_AUTH, target)
-    target.chmod(0o600)
+    atomic_write(CODEX_VAULT / f"{profile}.json", CODEX_AUTH.read_text(encoding="utf-8"))
     entry = registry["profiles"].setdefault(profile, {})
-    entry["codex"] = {"email": codex_identity()}
+    entry["codex"] = {"email": email}
     registry.setdefault("active", {})["codex"] = profile
-    return entry["codex"]["email"] or "unknown"
+    return email or "unknown"
 
 
 # ------------------------------------------------------------------ restore
 
 
-def restore_claude(profile: str, registry: dict) -> str:
+def preflight_claude(profile: str, registry: dict) -> None:
+    """Everything that must be true before a single byte is written."""
     stored = registry["profiles"].get(profile, {}).get("claude")
     if stored is None:
         raise Fail(f"profile {profile!r} has no captured Claude account")
+    if not stored.get("oauthAccount"):
+        raise Fail(
+            f"profile {profile!r} was captured without its identity — "
+            f"recapture it with `accsw save {profile} --tool claude --replace`"
+        )
     secret = keychain_read(profile_service(profile))
     if secret is None:
         raise Fail(
             f"profile {profile!r} lost its keychain item — recapture with `accsw save {profile}`"
         )
+    json.loads(secret)
+    if not CLAUDE_STATE.is_file():
+        raise Fail(f"{CLAUDE_STATE} does not exist — run Claude Code once before switching")
+    read_json(CLAUDE_STATE)
+
+
+def preflight_codex(profile: str, registry: dict) -> None:
+    stored = registry["profiles"].get(profile, {}).get("codex")
+    source = CODEX_VAULT / f"{profile}.json"
+    if stored is None or not source.is_file():
+        raise Fail(f"profile {profile!r} has no captured Codex account")
+    read_json(source)
+
+
+def restore_claude(profile: str, registry: dict) -> str:
+    stored = registry["profiles"][profile]["claude"]
+    secret = keychain_read(profile_service(profile))
     keychain_write(CLAUDE_KEYCHAIN_SERVICE, secret, "Claude Code")
-    set_claude_oauth_account(stored.get("oauthAccount"))
+    set_claude_oauth_account(stored["oauthAccount"])
     registry.setdefault("active", {})["claude"] = profile
     return stored.get("email") or "unknown"
 
 
 def restore_codex(profile: str, registry: dict) -> str:
-    stored = registry["profiles"].get(profile, {}).get("codex")
+    stored = registry["profiles"][profile]["codex"]
     source = CODEX_VAULT / f"{profile}.json"
-    if stored is None or not source.is_file():
-        raise Fail(f"profile {profile!r} has no captured Codex account")
-    CODEX_HOME.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source, CODEX_AUTH)
-    CODEX_AUTH.chmod(0o600)
+    atomic_write(CODEX_AUTH, source.read_text(encoding="utf-8"))
     registry.setdefault("active", {})["codex"] = profile
     return stored.get("email") or "unknown"
 
 
 CAPTURE = {"claude": capture_claude, "codex": capture_codex}
 RESTORE = {"claude": restore_claude, "codex": restore_codex}
+PREFLIGHT = {"claude": preflight_claude, "codex": preflight_codex}
+LIVE_IDENTITY = {"claude": claude_identity, "codex": codex_identity}
+
+
+def stash_live(tool: str, registry: dict) -> str | None:
+    """Park the credential that is loaded right now back into the profile it came from.
+
+    Without this, `use` is a one-way restore: a profile's stored blob goes stale as
+    its live session refreshes, and switching back writes a dead refresh token.
+    """
+    active = registry.get("active", {}).get(tool)
+    if active is None:
+        return None
+    live = LIVE_IDENTITY[tool]()
+    if live is None:
+        return None
+    known = registry["profiles"].get(active, {}).get(tool, {}).get("email")
+    if known and live != known:
+        raise Fail(
+            f"{tool} is logged in as {live}, but accsw believes {active!r} ({known}) is loaded. "
+            f"Capture it first with `accsw save <name> --tool {tool}` so nothing is lost."
+        )
+    CAPTURE[tool](active, registry)
+    return active
 
 
 # -------------------------------------------------------------------- quota
@@ -273,8 +369,17 @@ CLAUDE_WINDOWS = {
 
 
 def http_get_json(url: str, token: str) -> dict:
+    """GET with a bearer token, refusing redirects.
+
+    urllib copies every header onto a redirected request without comparing hosts, so
+    following one would hand a live access token to whatever host answered.
+    """
     import urllib.error
     import urllib.request
+
+    class RefuseRedirects(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *arguments, **keywords):
+            return None
 
     request = urllib.request.Request(
         url,
@@ -285,14 +390,19 @@ def http_get_json(url: str, token: str) -> dict:
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
+        opener = urllib.request.build_opener(RefuseRedirects)
+        with opener.open(request, timeout=HTTP_TIMEOUT) as response:
             return json.loads(response.read())
     except urllib.error.HTTPError as error:
         if error.code in (401, 403):
             raise Fail("token expired — switch to this account once to refresh it")
+        if 300 <= error.code < 400:
+            raise Fail(f"refused a {error.code} redirect — the token stays on this host")
         raise Fail(f"HTTP {error.code}")
     except urllib.error.URLError as error:
         raise Fail(f"unreachable ({error.reason})")
+    except json.JSONDecodeError:
+        raise Fail("response was not JSON")
 
 
 def parse_epoch(value) -> int | None:
@@ -322,9 +432,9 @@ def codex_access_token(document: str | None) -> str:
     if document is None:
         raise Fail("no stored credential")
     payload = json.loads(document)
-    token = payload.get("tokens", {}).get("access_token") or payload.get("access_token")
+    token = (payload.get("tokens") or {}).get("access_token") or payload.get("access_token")
     if not token:
-        raise Fail("credential has no access token")
+        raise Fail("credential has no access token (API-key mode has no usage window)")
     return token
 
 
@@ -379,29 +489,35 @@ QUOTA = {"claude": claude_quota, "codex": codex_quota}
 
 
 def gather_quota(registry: dict) -> dict[tuple[str, str], object]:
-    """Query every captured account in parallel. Values are window lists or Fail."""
-    from concurrent.futures import ThreadPoolExecutor
+    """Query every captured account, one at a time. Values are window lists or Fail.
 
+    Sequential on purpose: a burst of simultaneous authenticated requests for several
+    different accounts from one address is exactly the shape anti-abuse systems act on.
+    """
     jobs = [
         (name, tool)
         for name, entry in registry["profiles"].items()
         for tool in TOOLS
         if tool in entry
     ]
-    if not jobs:
-        return {}
-
-    def probe(job):
-        name, tool = job
+    snapshot = {}
+    for position, (name, tool) in enumerate(jobs):
+        if position:
+            time.sleep(0.15)
         try:
-            return job, QUOTA[tool](profile_token(tool, name))
+            snapshot[(name, tool)] = QUOTA[tool](profile_token(tool, name))
         except Fail as error:
-            return job, error
-        except (json.JSONDecodeError, KeyError, ValueError) as error:
-            return job, Fail(f"unexpected response ({type(error).__name__})")
+            snapshot[(name, tool)] = error
+        except Exception as error:  # a quota probe must never take the switcher down
+            snapshot[(name, tool)] = Fail(f"unexpected response ({type(error).__name__})")
+    return snapshot
 
-    with ThreadPoolExecutor(max_workers=min(8, len(jobs))) as pool:
-        return dict(pool.map(probe, jobs))
+
+def effective_percent(percent: float, resets_at: int | None) -> float:
+    """A window past its reset has rolled over, whatever the stored number says."""
+    if resets_at is not None and resets_at <= int(time.time()):
+        return 0.0
+    return percent
 
 
 def bar(percent: float, width: int = 10) -> str:
@@ -433,9 +549,10 @@ def format_quota(result) -> str:
         return "— no window reported"
     parts = []
     for label, percent, resets_at in result:
+        left = 100.0 - effective_percent(percent, resets_at)
         countdown = humanize_reset(resets_at)
-        suffix = f" resets {countdown}" if countdown else ""
-        parts.append(f"{label} {bar(percent)} {percent:>3.0f}%{suffix}")
+        suffix = f" resets {countdown}" if countdown else " reset"
+        parts.append(f"{label} {bar(left)} {left:>3.0f}% left{suffix}")
     return "   ".join(parts)
 
 
@@ -443,7 +560,7 @@ def headroom(result) -> float | None:
     """Free capacity in the most-constrained window. None when unknown."""
     if isinstance(result, Fail) or not result:
         return None
-    return 100.0 - max(percent for _, percent, _ in result)
+    return 100.0 - max(effective_percent(percent, at) for _, percent, at in result)
 
 
 # ------------------------------------------------------------------- picker
@@ -529,23 +646,24 @@ def profile_lines(
     return lines or [f"{name:<{width}}  (nothing captured)"]
 
 
-def best_profile(registry: dict, quota: dict) -> tuple[str | None, str]:
+def best_profile(
+    registry: dict, quota: dict, tools: tuple[str, ...] = TOOLS
+) -> tuple[str | None, str]:
     """The account whose most-constrained window is least used. Ties keep the active one."""
     active = registry.get("active", {})
     scored = []
     for name, entry in registry["profiles"].items():
-        margins = [
-            headroom(quota.get((name, tool))) for tool in TOOLS if tool in entry
-        ]
+        margins = [headroom(quota.get((name, tool))) for tool in tools if tool in entry]
         known = [margin for margin in margins if margin is not None]
         if not known:
             continue
-        scored.append((min(known), name in active.values(), name))
+        loaded = any(active.get(tool) == name for tool in tools)
+        scored.append((min(known), loaded, name))
     if not scored:
         return None, "no account reported usable quota"
     scored.sort(key=lambda row: (-row[0], not row[1], row[2]))
     margin, _, name = scored[0]
-    return name, f"{margin:.0f}% headroom in its tightest window"
+    return name, f"{margin:.0f}% left in its tightest window"
 
 
 def pick_profile(registry: dict) -> str | None:
@@ -602,19 +720,20 @@ def cmd_save(args) -> int:
     registry = load_registry()
     tools = selected_tools(args)
     saved = []
+    skipped = []
     for tool in tools:
         try:
-            email = CAPTURE[tool](args.profile, registry)
+            email = CAPTURE[tool](args.profile, registry, args.replace)
             saved.append(f"{tool}: {email}")
         except Fail as error:
             if args.tool:
                 raise
-            print(f"  skipped {tool} — {error}", file=sys.stderr)
+            skipped.append(f"skipped {tool} — {error}")
     if not saved:
-        raise Fail("nothing captured")
+        raise Fail("; ".join(skipped) or "nothing captured")
     save_registry(registry)
     print(f"saved profile {args.profile!r}")
-    for line in saved:
+    for line in saved + skipped:
         print(f"  {line}")
     return 0
 
@@ -627,18 +746,28 @@ def cmd_use(args) -> int:
             return 0
     elif args.profile not in registry["profiles"]:
         raise Fail(f"unknown profile {args.profile!r} — see `accsw list`")
-    tools = selected_tools(args)
+    wanted = selected_tools(args)
+    entry = registry["profiles"][args.profile]
+    tools = tuple(tool for tool in wanted if tool in entry)
+    if not tools:
+        raise Fail(f"profile {args.profile!r} holds no account for {', '.join(wanted)}")
     guard_running(tools, args.force)
+
+    # Verify every leg before mutating any of them: a half-applied switch leaves the
+    # registry disagreeing with reality, with no rollback.
+    for tool in tools:
+        PREFLIGHT[tool](args.profile, registry)
+
     switched = []
     for tool in tools:
-        stored = registry["profiles"][args.profile].get(tool)
-        if stored is None:
+        if registry.get("active", {}).get(tool) == args.profile:
+            switched.append(f"{tool}: already loaded")
             continue
+        if stash_live(tool, registry):
+            save_registry(registry)
         email = RESTORE[tool](args.profile, registry)
+        save_registry(registry)
         switched.append(f"{tool}: {email}")
-    if not switched:
-        raise Fail(f"profile {args.profile!r} holds no account for {', '.join(tools)}")
-    save_registry(registry)
     print(f"switched to {args.profile!r}")
     for line in switched:
         print(f"  {line}")
@@ -689,11 +818,13 @@ def cmd_auto(args) -> int:
     registry = load_registry()
     if not registry["profiles"]:
         raise Fail("no profiles yet — capture the current login with `accsw save <name>`")
+    tools = selected_tools(args)
     quota = gather_quota(registry)
-    name, why = best_profile(registry, quota)
+    name, why = best_profile(registry, quota, tools)
     if name is None:
         raise Fail(why)
-    if name in registry.get("active", {}).values():
+    active = registry.get("active", {})
+    if all(active.get(tool) == name for tool in tools if tool in registry["profiles"][name]):
         print(f"already on {name!r} — {why}")
         return 0
     args.profile = name
@@ -705,6 +836,11 @@ def cmd_rm(args) -> int:
     registry = load_registry()
     if args.profile not in registry["profiles"]:
         raise Fail(f"unknown profile {args.profile!r}")
+    if args.profile in registry.get("active", {}).values() and not args.yes:
+        raise Fail(
+            f"{args.profile!r} is the profile currently loaded — forgetting it drops the only "
+            "parked copy of that token. Switch elsewhere first, or pass --yes."
+        )
     keychain_delete(profile_service(args.profile))
     stored_codex = CODEX_VAULT / f"{args.profile}.json"
     if stored_codex.is_file():
@@ -728,6 +864,11 @@ def main() -> int:
     save = subparsers.add_parser("save", help="capture the currently logged-in account")
     save.add_argument("profile")
     save.add_argument("--tool", **tool_flag)
+    save.add_argument(
+        "--replace",
+        action="store_true",
+        help="rebind the profile even if a different account is logged in",
+    )
     save.set_defaults(handler=cmd_save)
 
     use = subparsers.add_parser("use", help="switch to a captured account")
@@ -757,6 +898,9 @@ def main() -> int:
 
     remove = subparsers.add_parser("rm", help="forget a profile")
     remove.add_argument("profile")
+    remove.add_argument(
+        "--yes", action="store_true", help="forget it even if it is the loaded profile"
+    )
     remove.set_defaults(handler=cmd_rm)
 
     args = parser.parse_args()
@@ -765,6 +909,12 @@ def main() -> int:
     except Fail as error:
         print(f"accsw: {error}", file=sys.stderr)
         return 1
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"accsw: {type(error).__name__}: {error}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\naccsw: interrupted", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

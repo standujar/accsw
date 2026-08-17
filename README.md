@@ -25,8 +25,10 @@ accsw save eliza          # log into the other account once, snapshot it too
 accsw use perso           # switch both tools, no menu
 accsw use eliza --tool codex   # or just one
 accsw auto                # switch to whichever account has the most headroom
+accsw auto --tool codex   # ...judged on Codex quota alone
 accsw status              # who am I right now, with live quota
 accsw list                # what's captured
+accsw save perso --replace  # rebind a profile to a different account, on purpose
 accsw rm perso            # forget a profile (never logs anything out)
 ```
 
@@ -49,12 +51,16 @@ refreshed by switching to that account once.
 
 The two tools store credentials differently, so `accsw` swaps whatever each one actually reads.
 
-**Claude Code** keeps its OAuth credential in the macOS keychain, service `Claude Code-credentials`,
-account = your macOS username. Because the account attribute is the OS user, that item is global:
-`CLAUDE_CONFIG_DIR` relocates settings and history but *not* the credential on macOS (on Linux and
-Windows it does, via `.credentials.json` — macOS is the odd one out). So a profile parks its blob in
-its own keychain item, `accsw-claude-<profile>`, and switching copies it back into the canonical one.
-The `oauthAccount` key of `~/.claude.json` is swapped alongside it so the identity metadata matches.
+**Claude Code** keeps its OAuth credential in the macOS keychain. The service name is
+`Claude Code-credentials`, optionally suffixed with the first eight hex characters of
+`sha256(CLAUDE_CONFIG_DIR)` — so a config dir *does* namespace the item, but with that variable unset
+there is exactly one global item keyed to your macOS username. A profile parks its blob in its own
+keychain item, `accsw-claude-<profile>`, and switching copies it back into the canonical one. The
+`oauthAccount` key of `~/.claude.json` is swapped alongside it so the identity metadata matches.
+
+The binary does contain a plaintext `.credentials.json` backend, and it is tempting — but it is
+unreachable on macOS: reads try the keychain first, and a successful keychain write *deletes* that
+file. It is a degradation mode, not a configuration, so keychain swapping is the only stable path.
 
 **Codex** keeps its credential in `$CODEX_HOME/auth.json`, a plain file. A profile is a copy of that
 file, and switching writes it back.
@@ -86,18 +92,28 @@ never logs anything out.
 
 Override the location with `ACCSW_HOME`.
 
-## Known limitation
+## How it protects the thing it is holding
 
-Writing a credential back into the keychain goes through `security add-generic-password -w <secret>`,
-which puts the secret in that process's argument list for the moment it runs. On a single-user Mac the
-only observer is you — any process already running as you could ask the keychain directly anyway. The
-airtight fix is to call the Security framework through `ctypes` and never spawn `security` at all;
-that is a worthwhile change, but it replaces a well-understood call with code that cannot be exercised
-without writing to a real keychain, so it is deliberately left as an open choice rather than shipped
-untested.
+Credentials are the whole point, so the handling is deliberate:
 
-`~/.claude.json` is rewritten through a temp file and `os.replace`, so an interrupted switch cannot
-truncate it.
+- **Never in an argument list.** Writes go to `security -i` over stdin, hex-encoded with `-X`, so no
+  secret ever appears in `ps`.
+- **Hex round-trips are decoded.** `security -w` returns hex whenever the stored bytes are not
+  printable ASCII. Storing that hex verbatim and writing it back would leave the canonical item
+  holding an unparseable string — a bricked login. It is detected and decoded.
+- **Every write is atomic.** Registry, `auth.json` and `~/.claude.json` are written to a temp file
+  created at mode 600, fsynced, then `os.replace`d. No truncation window, no world-readable window.
+- **Switching is a swap, not a restore.** Before loading a profile, the credential currently live is
+  parked back into the profile it came from. Without that, a profile's stored blob goes stale as its
+  session refreshes, and switching back would write a dead refresh token — a browser re-login, which
+  is the exact thing this tool exists to avoid.
+- **Every leg is checked before any byte is written**, so a switch cannot half-apply.
+- **A failed keychain read is not "no credential".** Only exit 44 means absent; a locked keychain or
+  a denied ACL raises, instead of advising a recapture that would overwrite a good parked blob.
+- **Quota reads are sequential**, not a burst of simultaneous authenticated requests for several
+  accounts from one address.
+- **Redirects are refused.** `urllib` copies headers onto a redirected request without comparing
+  hosts, so following one would hand a live access token to whatever host answered.
 
 ## Requirements
 
@@ -106,7 +122,7 @@ macOS, Python 3. No third-party packages.
 ## Tests
 
 ```
-python3 tests/test_quota.py     # 35 checks — window parsing, formatting, auto-selection
+python3 tests/test_quota.py     # 47 checks — window parsing, rollover, hex, auto-selection
 python3 tests/test_picker.py    # 11 checks — the picker driven through a real pty
 ```
 

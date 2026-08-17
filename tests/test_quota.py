@@ -113,7 +113,17 @@ quota = {
 }
 name, why = accsw.best_profile(registry, quota)
 check("picks the roomier account", name, "perso")
-check_that("explains itself", "headroom" in why, why)
+check_that("explains itself", "left in its tightest window" in why, why)
+
+print("best_profile honours --tool instead of mixing both")
+tool_split = {
+    ("perso", "claude"): [("7d", 90.0, None)],
+    ("perso", "codex"): [("7d", 5.0, None)],
+    ("eliza", "claude"): [("7d", 10.0, None)],
+    ("eliza", "codex"): [("7d", 95.0, None)],
+}
+check("codex-only picks perso", accsw.best_profile(registry, tool_split, ("codex",))[0], "perso")
+check("claude-only picks eliza", accsw.best_profile(registry, tool_split, ("claude",))[0], "eliza")
 
 print("a tie keeps the account already loaded")
 quota_tied = {
@@ -134,12 +144,30 @@ quota_broken = {
 check("falls back to the only known one", accsw.best_profile(registry, quota_broken)[0], "eliza")
 check("all unknown returns nothing", accsw.best_profile(registry, {})[0], None)
 
-print("format_quota surfaces failures verbatim")
+print("a window past its reset has rolled over, whatever the stored number said")
+check("future window keeps its number", accsw.effective_percent(38.0, now + HOUR), 38.0)
+check("expired window reads as empty", accsw.effective_percent(99.0, now - 60), 0.0)
+check("unknown reset keeps its number", accsw.effective_percent(38.0, None), 38.0)
+check("headroom follows the rollover", accsw.headroom([("7d", 99.0, now - 60)]), 100.0)
+
+print("format_quota reports what is LEFT, and surfaces failures verbatim")
 check("error text shown", accsw.format_quota(accsw.Fail("token expired")), "— token expired")
 check_that(
-    "window line has bar, percent and reset",
-    accsw.format_quota([("5h", 38.0, now + 2 * HOUR)]) == "5h ████░░░░░░  38% resets 2h",
+    "window line reads as remaining",
+    accsw.format_quota([("5h", 38.0, now + 2 * HOUR)]) == "5h ██████░░░░  62% left resets 2h",
     accsw.format_quota([("5h", 38.0, now + 2 * HOUR)]),
+)
+
+print("hex detection guards the keychain round-trip")
+check("json is not hex", accsw.looks_hex('{"a":1}'), False)
+check("even-length lowercase hex", accsw.looks_hex("7b2261223a317d0a"), True)
+check("odd length is not hex", accsw.looks_hex("7b2261223a317d0"), False)
+check("empty is not hex", accsw.looks_hex(""), False)
+check("uppercase is not hex", accsw.looks_hex("7B2261223A317D0A"), False)
+check(
+    "hex decodes back to the original blob",
+    bytes.fromhex('{"a":1}\n'.encode().hex()).decode(),
+    '{"a":1}\n',
 )
 
 passed = sum(results)
