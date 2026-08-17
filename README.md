@@ -1,7 +1,7 @@
 # accsw
 
 You have several Claude accounts and several ChatGPT accounts. This puts you on whichever one still
-has quota left — across the CLIs, the IDE extensions and the desktop apps — without ever logging out.
+has quota left — across the CLIs, the IDE extensions and the ChatGPT app — without ever logging out.
 
 ```
 $ accsw
@@ -30,11 +30,12 @@ accsw status       every account: what is left, when it comes back
 accsw list         which accounts are captured
 accsw add claude   sign in to another account, without logging out of this one
 accsw add codex
+accsw add claude --email you@example.com   # if the address cannot be read back
 ```
 
 ```
-accsw --renew      refresh every sign-in, switch nothing        (repairs a stale account)
-accsw --agent on   run that hourly in the background            (--agent off removes it)
+accsw --renew      refresh the idle sign-ins, switch nothing    (repairs a stale account)
+accsw --agent on   run that every 30 min in the background      (--agent off removes it)
 ```
 
 In the output, `→` means it moved you and `·` means you were already there. `--renew` never switches,
@@ -46,8 +47,8 @@ A sign-in has one valid refresh token at a time, so whoever refreshes last holds
 age loses that race to any process still running on the old credential, and a lost race cannot be
 recovered — that is the re-login this tool exists to avoid.
 
-So every run renews the accounts you are *not* on, and the first run offers an hourly agent that does
-the same in the background. It asks before installing anything, and remembers a refusal. The account
+So every run renews the accounts you are *not* on once they come within half an hour of expiring, and
+the first run offers an agent that does the same every 30 minutes in the background. It asks before installing anything, and remembers a refusal. The account
 you are on is deliberately left alone: the tool using it refreshes it itself, and taking the token
 out from under a live session is the same bug seen from the other side.
 
@@ -75,8 +76,9 @@ anything else, so an account cannot be lost by forgetting a command.
 
 ## How it chooses
 
-**Claude:** the most Fable left. If every account has spent its Fable, the most 5-hour window, then
-the most weekly. An account whose weekly or 5-hour window is fully spent is out of the running
+**Claude:** the most Fable left; ties fall through to the 5-hour window, then to the week. A window
+the account does not report counts as free, so an account that has never touched Fable outranks one
+still holding some. An account whose weekly or 5-hour window is fully spent is out of the running
 entirely — those stop everything, whereas a spent model only stops that model.
 
 **Codex:** the most left, plainly.
@@ -111,8 +113,10 @@ it on the new account.
 
 ```
 ~/.config/accsw/registry.json          which accounts exist        (0600)
+~/.config/accsw/renew.log              what the background agent did
 ~/.config/accsw/codex/<account>.json   Codex credentials           (0600)
 keychain accsw-claude-<account>        Claude credentials
+~/Library/LaunchAgents/com.standujar.accsw.plist   the renewal agent, if you kept it
 ```
 
 ## How the credentials are handled

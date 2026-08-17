@@ -434,6 +434,52 @@ for _node in _ast.walk(_tree):
             _wrong.append(f"line {_node.lineno}: {_node.func.id}() gets {_given}")
 check_that("no call disagrees with its definition", not _wrong, "; ".join(_wrong))
 
+print("no function reads a name that does not exist")
+# py_compile cannot see this, and a wrong one waits for the branch that reaches it —
+# which is how a crash reached a user tonight.
+_mod = {n.name for n in _ast.walk(_tree) if isinstance(n, (_ast.FunctionDef, _ast.ClassDef))}
+_mod |= {t.id for n in _ast.walk(_tree) if isinstance(n, _ast.Assign)
+         for t in _ast.walk(n) if isinstance(t, _ast.Name) and isinstance(t.ctx, _ast.Store)}
+_mod |= {a.asname or a.name.split(".")[0] for n in _ast.walk(_tree)
+         if isinstance(n, (_ast.Import, _ast.ImportFrom)) for a in n.names}
+import builtins as _bi
+_mod |= set(dir(_bi))
+
+def _bound(node):
+    names = set()
+    args = getattr(node, "args", None)
+    if args is not None:
+        names |= {a.arg for a in list(args.args) + list(args.kwonlyargs) + list(args.posonlyargs)}
+        for extra in (args.vararg, args.kwarg):
+            if extra:
+                names.add(extra.arg)
+    for inner in _ast.walk(node):
+        if isinstance(inner, _ast.Lambda):
+            names |= {a.arg for a in inner.args.args}
+        elif isinstance(inner, _ast.Name) and isinstance(inner.ctx, _ast.Store):
+            names.add(inner.id)
+        elif isinstance(inner, (_ast.Import, _ast.ImportFrom)):
+            names |= {a.asname or a.name.split(".")[0] for a in inner.names}
+        elif isinstance(inner, _ast.ExceptHandler) and inner.name:
+            names.add(inner.name)
+        elif isinstance(inner, (_ast.FunctionDef, _ast.ClassDef)) and inner is not node:
+            names.add(inner.name)
+            # a nested function's parameters are in scope for its own body, which
+            # this walk also visits
+            if isinstance(inner, _ast.FunctionDef):
+                names |= {a.arg for a in inner.args.args}
+        elif isinstance(inner, _ast.comprehension):
+            names |= {t.id for t in _ast.walk(inner.target) if isinstance(t, _ast.Name)}
+    return names
+
+_undefined = []
+for _fn in [n for n in _ast.walk(_tree) if isinstance(n, _ast.FunctionDef)]:
+    _known = _bound(_fn) | _mod
+    for _n in _ast.walk(_fn):
+        if isinstance(_n, _ast.Name) and isinstance(_n.ctx, _ast.Load) and _n.id not in _known:
+            _undefined.append(f"{_fn.name}:{_n.lineno} {_n.id}")
+check_that("no undefined name", not _undefined, "; ".join(sorted(set(_undefined))))
+
 print("every argument a command reads is one argparse sets")
 _set = {"handler"}
 for _node in _ast.walk(_tree):
