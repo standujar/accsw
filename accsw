@@ -831,6 +831,27 @@ def selected_tools(args) -> tuple[str, ...]:
     return (args.tool,) if args.tool else TOOLS
 
 
+# Long-lived readers of the same credential slot. They cache the token in memory at
+# startup, so a switch reaches them only when they are restarted.
+SLOT_READERS = {
+    "claude": ("Claude Code sessions and the Cursor/VSCode extension", None),
+    "codex": ("ChatGPT.app", "/Applications/ChatGPT.app/Contents/"),
+}
+
+
+def running_matching(marker: str) -> int:
+    result = run(["pgrep", "-f", marker])
+    return len(result.stdout.split()) if result.returncode == 0 else 0
+
+
+def restart_hint(tools: tuple[str, ...]) -> None:
+    for tool in tools:
+        label, marker = SLOT_READERS[tool]
+        count = running_matching(marker) if marker else len(running(tool))
+        if count:
+            note(f"{label}: still on the old account until restarted")
+
+
 def warn_running(tools: tuple[str, ...]) -> None:
     """Warn, never block.
 
@@ -907,6 +928,7 @@ def cmd_use(args) -> int:
     print(f"switched to {args.profile!r}")
     for line in switched:
         print(f"  {line}")
+    restart_hint(tools)
     return 0
 
 
