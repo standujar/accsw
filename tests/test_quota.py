@@ -149,13 +149,13 @@ check("codex compares on its single window",
       accsw.selection_key([("7d", 30.0, None)], "codex"), (70.0,))
 
 print("the offline guard makes a forgotten stub fail loudly")
-import importlib
-real = accsw.http_get_json
+# a fresh module, so the stubs installed above cannot mask the real function
+pristine = importlib.util.module_from_spec(importlib.util.spec_from_loader("accsw_raw", loader))
+loader.exec_module(pristine)
 try:
-    accsw.http_get_json = real  # the module-level ACCSW_OFFLINE=1 is what bites
-    accsw.http_get_json("https://api.anthropic.com/api/oauth/usage", "not-a-token")
+    pristine.http_get_json("https://api.anthropic.com/api/oauth/usage", "not-a-token")
     check_that("refuses to reach the network", False, "it made a call")
-except accsw.Fail as error:
+except pristine.Fail as error:
     check_that("refuses to reach the network", "offline" in str(error), str(error))
 
 print("headroom is free capacity in the tightest window")
