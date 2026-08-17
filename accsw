@@ -452,6 +452,7 @@ def load_state() -> dict:
 # -------------------------------------------------------------------- quota
 
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CLAUDE_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 HTTP_TIMEOUT = 6
 QUOTA_TTL = 120
@@ -544,6 +545,22 @@ def live_token(tool: str) -> str:
     if tool == "claude":
         return claude_access_token(keychain_read(CLAUDE_KEYCHAIN_SERVICE))
     return codex_access_token(read_file(CODEX_AUTH))
+
+
+def claude_oauth_identity(token: str) -> dict:
+    """Ask the API whose credential this is, rather than making the user type it."""
+    payload = http_get_json(CLAUDE_PROFILE_URL, token)
+    account = payload.get("account") or {}
+    organization = payload.get("organization") or {}
+    if not account.get("email"):
+        raise Fail("the profile endpoint returned no address for this credential")
+    return {
+        "emailAddress": account["email"],
+        "accountUuid": account.get("uuid"),
+        "organizationUuid": organization.get("uuid"),
+        "organizationName": organization.get("name"),
+        "organizationType": organization.get("organization_type"),
+    }
 
 
 def claude_quota(token: str) -> list[tuple[str, float, int | None]]:
@@ -1156,8 +1173,8 @@ def cmd_add(args) -> int:
         blob = keychain_read(service)
         if blob is None:
             raise Fail("no credential was written — the sign-in did not complete")
-        keychain_delete(service)
-        email = None
+        account = claude_oauth_identity(claude_access_token(blob))
+        email = account["emailAddress"]
 
     if email is None:
         email = args.email
@@ -1177,8 +1194,11 @@ def cmd_add(args) -> int:
         keychain_write(profile_service(name), blob, f"accsw claude — {name}")
         registry["profiles"].setdefault(name, {})["claude"] = {
             "email": email,
-            "oauthAccount": {"emailAddress": email},
+            "oauthAccount": account,
         }
+        # Only now that it is filed: dropping it any earlier would throw away a
+        # sign-in the user just completed.
+        keychain_delete(claude_namespaced_service(workspace))
     save_registry(registry)
     shutil.rmtree(workspace, ignore_errors=True)
     print(f"\nadded {email} as {name!r} — `accsw` will use it when it has the most left")
