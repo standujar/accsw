@@ -1098,14 +1098,12 @@ def best_profile(registry: dict, quota: dict, tool: str) -> tuple[str | None, st
 # same way the CLI does. They cache the token at startup, so a switch reaches them
 # only on relaunch. IDE extensions are absent on purpose: they spawn a fresh CLI
 # process per session, so a NEW chat already picks up the new account.
-GUI_APPS = {"claude": "Claude", "codex": "ChatGPT"}
+# Only ChatGPT.app: it reads the credential file accsw swaps, so reopening it lands
+# on the new account. Claude.app cannot be signed in for you at all, so bouncing it
+# would only interrupt you to show a login screen.
+GUI_APPS = {"codex": "ChatGPT"}
 
 
-# Claude.app reads CLAUDE_USER_DATA_DIR and CLAUDE_CONFIG_DIR at startup, both
-# ungated, and holds no single-instance lock. So each account gets its own profile
-# and stays signed in there — nothing to swap, nothing to identify.
-CLAUDE_APP_DATA = STORE / "claude-app"
-CLAUDE_BINARY = Path("/Applications/Claude.app/Contents/MacOS/Claude")
 
 
 def quit_app(name: str) -> None:
@@ -1119,55 +1117,8 @@ def quit_app(name: str) -> None:
     raise Fail(f"{name} did not quit; it was left on its current account")
 
 
-CLAUDE_APP_SUPPORT = HOME / "Library" / "Application Support" / "Claude"
 
 
-def point_claude_app_at(profile: str) -> bool:
-    """Make the app's own support directory a link to this profile's.
-
-    Environment variables only reach the app when accsw launches it; opening it
-    from the Dock would land on the default profile instead. Linking the path the
-    app always reads puts it on the right account however it is started.
-
-    Returns True when the link had to move, so the caller knows a restart is due.
-    """
-    target = CLAUDE_APP_DATA / profile
-    target.mkdir(parents=True, exist_ok=True)
-    target.chmod(0o700)
-
-    if CLAUDE_APP_SUPPORT.is_symlink():
-        if CLAUDE_APP_SUPPORT.readlink() == target:
-            return False
-        quit_app("Claude")
-        CLAUDE_APP_SUPPORT.unlink()
-    elif CLAUDE_APP_SUPPORT.exists():
-        # A real directory from before accsw: kept whole, once, under its own name.
-        quit_app("Claude")
-        kept = CLAUDE_APP_DATA / "_before-accsw"
-        if kept.exists():
-            raise Fail(f"{kept} already exists — move it aside by hand and rerun")
-        CLAUDE_APP_DATA.mkdir(parents=True, exist_ok=True)
-        CLAUDE_APP_SUPPORT.rename(kept)
-        note(f"kept the previous Claude profile as {kept}")
-    CLAUDE_APP_SUPPORT.symlink_to(target)
-    return True
-
-
-def launch_claude_app(profile: str) -> None:
-    """Put the app on this profile, then start it.
-
-    Its built-in Claude Code reads the canonical keychain item, which the switch
-    already installed, so both halves of the window agree without extra plumbing.
-    """
-    if not CLAUDE_BINARY.exists():
-        return
-    point_claude_app_at(profile)
-    subprocess.Popen(
-        [str(CLAUDE_BINARY)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
 
 
 def app_running(name: str) -> bool:
@@ -1204,23 +1155,18 @@ def note(message: str) -> None:
     print(f"accsw: {message}", file=sys.stderr)
 
 
-def settle_readers(tools: tuple[str, ...], profile: str | None, registry: dict) -> None:
-    """Put the desktop apps on the account that was just installed.
+def settle_readers(tools: tuple[str, ...]) -> None:
+    """Reopen the desktop apps that read a credential we just swapped.
 
-    ChatGPT.app reads $CODEX_HOME/auth.json — the very slot that was swapped — so a
-    relaunch is enough. Claude.app is opened on this profile's own directories.
+    Only ChatGPT.app qualifies: it reads $CODEX_HOME/auth.json, the very file that
+    changed. Claude.app is left alone — it signs in with a web session accsw cannot
+    produce, so closing it would cost you a window and give nothing back.
     """
     for tool in tools:
-        name = GUI_APPS[tool]
-        live = app_running(name)
-        if tool == "claude" and profile:
-            # Already on this profile and running: leave it be.
-            if live and registry.get("app_profile") == profile:
-                continue
-            launch_claude_app(profile)
-            registry["app_profile"] = profile
-            note(f"{'reopened' if live else 'opened'} {name} on {profile}")
-        elif live:
+        name = GUI_APPS.get(tool)
+        if name is None:
+            continue
+        if app_running(name):
             restart_app(name)
             note(f"reopened {name}")
         else:
@@ -1366,19 +1312,11 @@ def cmd_auto(args) -> int:
             # spent, that is every single run. The link is still checked, because it
             # costs nothing and decides where a Dock launch lands.
             print(f"{tool}: staying on {name} — {why}")
-            if tool == "claude" and CLAUDE_BINARY.exists():
-                # Sampled first: relinking quits the app, so asking afterwards always
-                # answers "not running" and the window never comes back.
-                live = app_running("Claude")
-                if point_claude_app_at(name):
-                    note(f"pointed Claude at {name}")
-                    if live:
-                        launch_claude_app(name)
             continue
         for line in apply_switch(name, (tool,), registry):
             print(f"{tool}: {line}")
         print(f"  → {name}, {why}")
-        settle_readers((tool,), name, registry)
+        settle_readers((tool,))
     return 0
 
 

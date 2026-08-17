@@ -64,34 +64,29 @@ The two are chosen independently, because they are two separate logins.
 | Claude Code in Cursor / VSCode | yes | same credential, but the extension host caches it — **reload the window** (`Cmd-Shift-P` → Reload Window) |
 | `codex` CLI | yes | reads the file accsw swaps |
 | ChatGPT desktop app | yes | same file; accsw reopens it |
-| Claude desktop app — coding side | yes | same credential |
-| Claude desktop app — **chat side** | **no** | see below |
+| Claude desktop app | **no** | not touched at all — see below |
 
 ## The one thing it cannot do
 
-The Claude desktop app's chat signs in with a **web session cookie**, issued by a browser login on
-claude.ai. What accsw holds is Claude Code's **OAuth token** — a different credential from a
-different flow. There is no exchange between the two: the app only ever writes `lastActiveOrg`
-itself, and the session cookie is set and revoked server-side.
+**It does not touch the Claude desktop app.** That app signs in with a web session cookie, issued by
+a browser login on claude.ai. What accsw holds is Claude Code's OAuth token — a different credential
+from a different flow, and there is no exchange between the two: the app only ever writes
+`lastActiveOrg` itself, and the session cookie is set and revoked server-side.
 
-So each Claude account needs one browser sign-in in that app, roughly monthly. accsw gives each
-account its own profile and points the app at the right one, so those sign-ins accumulate instead of
-replacing each other.
+Per-account profiles for it were built and then removed. They worked mechanically and bought nothing:
+every profile still needed its own browser sign-in, so switching only ever closed a window to show a
+login screen. The app is left exactly where it is.
 
-**Never click Log Out in that app.** Anthropic invalidates the session server-side and the saved
-profile becomes useless.
+ChatGPT.app has no such limitation — it reads the same credential file as the CLI, so accsw reopens
+it on the new account.
 
 ## Where things are kept
 
 ```
 ~/.config/accsw/registry.json          which accounts exist        (0600)
 ~/.config/accsw/codex/<account>.json   Codex credentials           (0600)
-~/.config/accsw/claude-app/<account>/  desktop app profiles
 keychain accsw-claude-<account>        Claude credentials
 ```
-
-A pre-existing desktop app profile is kept whole as `claude-app/_before-accsw` — nothing is merged or
-discarded.
 
 ## How the credentials are handled
 
