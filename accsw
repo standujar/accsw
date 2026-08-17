@@ -447,7 +447,7 @@ def load_state() -> dict:
 # -------------------------------------------------------------------- quota
 
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-CODEX_PROFILE_URL = "https://chatgpt.com/backend-api/wham/profiles/me"
+CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 HTTP_TIMEOUT = 6
 
 # Claude reports one window per scope; these are the ones worth showing.
@@ -557,29 +557,33 @@ def claude_quota(token: str) -> list[tuple[str, float, int | None]]:
     return windows
 
 
-def codex_quota(token: str) -> list[tuple[str, float, int | None]]:
-    """Codex has no free quota endpoint.
+def window_label(seconds) -> str:
+    """Name a window by its own declared length rather than assuming 5h/7d."""
+    if not isinstance(seconds, (int, float)) or seconds <= 0:
+        return "?"
+    hours = seconds / 3600
+    return f"{int(hours)}h" if hours < 24 else f"{int(hours / 24)}d"
 
-    `wham/profiles/me` returns lifetime stats — tokens, streaks — and no limits.
-    The real numbers (`RateLimitWindow { used_percent, window_minutes, resets_at }`)
-    reach the client as a streamed event during an actual turn, so reading them
-    would mean paying for a completion. We do not do that behind your back; Codex
-    simply has no quota to show until OpenAI exposes one.
+
+def codex_quota(token: str) -> list[tuple[str, float, int | None]]:
+    """`wham/usage` is the free read.
+
+    Not `wham/profiles/me`, which returns lifetime stats and no limits at all.
+    Each window carries used_percent, its own length, and an absolute reset_at.
     """
-    payload = http_get_json(CODEX_PROFILE_URL, token)
-    limits = payload.get("rateLimits") or {}
-    if not limits:
-        raise Fail("no quota endpoint — Codex only reports limits during a live turn")
+    payload = http_get_json(CODEX_USAGE_URL, token)
+    limits = payload.get("rate_limit") or {}
     windows = []
-    for key, label in (("primary", "5h"), ("secondary", "7d")):
+    for key in ("primary_window", "secondary_window"):
         window = limits.get(key)
         if not isinstance(window, dict):
             continue
-        minutes = window.get("windowDurationMins")
-        if isinstance(minutes, (int, float)):
-            label = f"{int(minutes / 60)}h" if minutes < 1440 else f"{int(minutes / 1440)}d"
         windows.append(
-            (label, float(window.get("usedPercent", 0.0)), parse_epoch(window.get("resetsAt")))
+            (
+                window_label(window.get("limit_window_seconds")),
+                float(window.get("used_percent", 0.0)),
+                parse_epoch(window.get("reset_at")),
+            )
         )
     return windows
 

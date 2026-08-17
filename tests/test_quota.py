@@ -76,25 +76,37 @@ print("claude 'percent' spelling is accepted too")
 accsw.http_get_json = lambda url, token: {"five_hour": {"percent": 12.0, "resets_at": now + 600}}
 check("percent fallback", accsw.claude_quota("token")[0][1], 12.0)
 
-print("codex payloads map to windows")
+print("windows are named by their own declared length")
+check("five hours", accsw.window_label(5 * HOUR), "5h")
+check("one week", accsw.window_label(604800), "7d")
+check("one day", accsw.window_label(DAY), "1d")
+check("missing length is unknown", accsw.window_label(None), "?")
+
+print("codex payloads map to windows (wham/usage shape)")
 accsw.http_get_json = lambda url, token: {
-    "rateLimits": {
-        "primary": {"usedPercent": 12.0, "windowDurationMins": 300, "resetsAt": now + 45 * 60},
-        "secondary": {"usedPercent": 9.0, "windowDurationMins": 10080, "resetsAt": now + 5 * DAY},
-    }
+    "plan_type": "pro",
+    "rate_limit": {
+        "allowed": False,
+        "limit_reached": True,
+        "primary_window": {
+            "used_percent": 100,
+            "limit_window_seconds": 604800,
+            "reset_after_seconds": 307744,
+            "reset_at": now + 3 * DAY,
+        },
+        "secondary_window": None,
+    },
 }
 windows = accsw.codex_quota("token")
-check("labels from window duration", [label for label, _, _ in windows], ["5h", "7d"])
-check("used percent read", [percent for _, percent, _ in windows], [12.0, 9.0])
+check("only the reported window", [label for label, _, _ in windows], ["7d"])
+check("exhausted account reads 100 used", windows[0][1], 100.0)
+check("no headroom left", accsw.headroom(windows), 0.0)
+check_that("renders as empty", accsw.format_quota(windows).startswith("7d ░░░░░░"), accsw.format_quota(windows))
 
-print("codex says plainly that it has no free quota endpoint")
-accsw.http_get_json = lambda url, token: {"profile": {}, "stats": {}, "metadata": {}}
-try:
-    accsw.codex_quota("token")
-    check_that("raises rather than showing an empty gauge", False, "no exception")
-except accsw.Fail as error:
-    check_that("raises rather than showing an empty gauge", "no quota endpoint" in str(error), str(error))
-check("an empty window list still formats", accsw.format_quota([]), "— no window reported")
+print("a payload with no rate_limit yields no windows rather than a wrong gauge")
+accsw.http_get_json = lambda url, token: {"plan_type": "pro"}
+check("no windows", accsw.codex_quota("token"), [])
+check("formatted as a notice", accsw.format_quota([]), "— no window reported")
 
 print("headroom is free capacity in the tightest window")
 check("tightest wins", accsw.headroom([("5h", 38.0, None), ("7d", 71.5, None)]), 28.5)

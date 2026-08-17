@@ -50,10 +50,13 @@ different accounts from one address is the shape anti-abuse systems act on.
 
 - **Claude** — `GET api.anthropic.com/api/oauth/usage`, which reports a `five_hour` and a `seven_day`
   window, each with a utilization percentage and a reset timestamp.
-- **Codex** — no free source exists. `wham/profiles/me` returns lifetime stats, not limits, and the
-  real numbers (`RateLimitWindow { used_percent, window_minutes, resets_at }`) reach the client as a
-  streamed event *during a turn*. Reading them would mean paying for a completion, so accsw says so
-  instead of doing it behind your back. Auto-selection simply has no Codex signal to act on.
+- **Codex** — `GET chatgpt.com/backend-api/wham/usage`, whose `rate_limit.primary_window` and
+  `.secondary_window` carry `used_percent`, `limit_window_seconds` and an absolute `reset_at`. Note
+  the endpoint: `wham/profiles/me` looks like the obvious candidate and is the wrong one — it returns
+  lifetime token stats and no limits at all. The same response also exposes `plan_type`, reset
+  credits and per-model limits, which are not surfaced yet.
+
+Windows are labelled from the length each one declares, rather than assuming five hours and a week.
 
 Auto-selection has one rule, and it fits in a sentence: **pick the account whose most-constrained
 window is least used.** A tie keeps whatever is already loaded, so it never switches for nothing.
