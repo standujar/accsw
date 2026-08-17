@@ -1,160 +1,124 @@
 # accsw
 
-Switch Claude Code and Codex between accounts without ever logging out — and put the desktop apps on
-the same account while you are at it.
+You have several Claude accounts and several ChatGPT accounts. This puts you on whichever one still
+has quota left — across the CLIs, the IDE extensions and the desktop apps — without ever logging out.
 
 ```
 $ accsw
-claude: developer — Fable at 20% left
-accsw: reopened Claude on developer
-codex: staying on stan — 7d at 62% left
+claude: shawgotbags2 — Fable at 63% left
+codex: staying on stan — 7d at 41% left
 ```
 
-That is the whole daily surface. Run it and you are on the account with the most left; run it again
-and it does nothing, because nothing needed doing.
+Run it whenever. If you are already on the best account it does nothing at all.
+
+## Install
+
+macOS, Python 3, nothing else.
 
 ```
-accsw            # go to the best account, and open the apps on it
-accsw status     # every account, with what is left and when it comes back
-accsw list       # who is captured
-accsw add claude # sign in to another account without logging out of this one
+git clone https://github.com/standujar/accsw.git
+ln -s "$PWD/accsw/accsw" ~/.local/bin/accsw
+```
+
+## The four commands
+
+```
+accsw              go to the account with the most left
+accsw status       every account: what is left, when it comes back
+accsw list         which accounts are captured
+accsw add claude   sign in to another account, without logging out of this one
 accsw add codex
 ```
 
+There is no fifth command on purpose.
+
+## Adding your accounts
+
+Once per account, forever:
+
+```
+accsw add claude
+```
+
+A browser opens, you sign in, and that account joins the pool. It never touches the account you are
+currently using, so you can add one at any time.
+
+Whatever you sign into by hand is picked up too — every run captures the live account before doing
+anything else, so an account cannot be lost by forgetting a command.
+
+## How it chooses
+
+**Claude:** the most Fable left. If every account has spent its Fable, the most 5-hour window, then
+the most weekly. An account whose weekly or 5-hour window is fully spent is out of the running
+entirely — those stop everything, whereas a spent model only stops that model.
+
+**Codex:** the most left, plainly.
+
+The two are chosen independently, because they are two separate logins.
+
+## What follows a switch
+
+| | follows | how |
+|---|---|---|
+| `claude` CLI | yes | reads the credential accsw swaps |
+| Claude Code in Cursor / VSCode | yes | same credential; a *new* chat starts on the new account |
+| `codex` CLI | yes | reads the file accsw swaps |
+| ChatGPT desktop app | yes | same file; accsw reopens it |
+| Claude desktop app — coding side | yes | same credential |
+| Claude desktop app — **chat side** | **no** | see below |
+
 ## The one thing it cannot do
 
-Claude.app cannot be signed in for you. It authenticates with a **web session cookie**, issued by a
-browser login on claude.ai; what accsw holds is Claude Code's **OAuth token**, issued by a different
-flow for a different purpose. There is no exchange between the two — checked in the app's own code,
-where the only cookie it ever writes itself is `lastActiveOrg`, and the session key is set and
-revoked server-side.
+The Claude desktop app's chat signs in with a **web session cookie**, issued by a browser login on
+claude.ai. What accsw holds is Claude Code's **OAuth token** — a different credential from a
+different flow. There is no exchange between the two: the app only ever writes `lastActiveOrg`
+itself, and the session cookie is set and revoked server-side.
 
-So each Claude account needs one browser sign-in, once, in its own profile. After that the profile
-stays signed in and switching never asks again. ChatGPT.app has no such cost: it reads the same
-credential file as the CLI, which accsw already swaps and renews.
+So each Claude account needs one browser sign-in in that app, roughly monthly. accsw gives each
+account its own profile and points the app at the right one, so those sign-ins accumulate instead of
+replacing each other.
 
-## Quota
+**Never click Log Out in that app.** Anthropic invalidates the session server-side and the saved
+profile becomes useless.
 
-Numbers are read live, one account at a time, every time you open the picker. Each account's own
-stored token queries its own usage, so you see every account's state without switching to it. The
-reads are sequential on purpose — a burst of simultaneous authenticated requests for several
-different accounts from one address is the shape anti-abuse systems act on.
+## Where things are kept
 
-Claude is chosen on **Fable first, then the 5h window, then the week** — the order in which those
-limits actually stop work. A spent *model* window only steers the choice; a spent *unscoped* window
-disqualifies the account outright, and its 5h line is hidden because it can read 100% and buy nothing.
+```
+~/.config/accsw/registry.json          which accounts exist        (0600)
+~/.config/accsw/codex/<account>.json   Codex credentials           (0600)
+~/.config/accsw/claude-app/<account>/  desktop app profiles
+keychain accsw-claude-<account>        Claude credentials
+```
 
-- **Claude** — `GET api.anthropic.com/api/oauth/usage`, which reports a `five_hour` and a `seven_day`
-  window, each with a utilization percentage and a reset timestamp.
-- **Codex** — `GET chatgpt.com/backend-api/wham/usage`, whose `rate_limit.primary_window` and
-  `.secondary_window` carry `used_percent`, `limit_window_seconds` and an absolute `reset_at`. Note
-  the endpoint: `wham/profiles/me` looks like the obvious candidate and is the wrong one — it returns
-  lifetime token stats and no limits at all. The same response also exposes `plan_type`, reset
-  credits and per-model limits, which are not surfaced yet.
+A pre-existing desktop app profile is kept whole as `claude-app/_before-accsw` — nothing is merged or
+discarded.
 
-Windows are labelled from the length each one declares, rather than assuming five hours and a week.
+## How the credentials are handled
 
-Auto-selection has one rule, and it fits in a sentence: **pick the account whose most-constrained
-window is least used.** A tie keeps whatever is already loaded, so it never switches for nothing.
-Accounts whose token has expired are reported as such and never chosen — an expired token is
-refreshed by switching to that account once. A window past its reset counts as empty, whatever
-number was last recorded for it.
+Expiring sign-ins are renewed before use. That matters more than it sounds: renewing **rotates** the
+refresh token, so the stored copy and the live one are always written together — leaving either
+behind strands the account.
 
-`accsw run` applies that rule and then becomes the tool, so you never switch by hand.
+An account is always identified by asking its own credential who it belongs to, never by reading a
+neighbouring file. And what is loaded is read from the slot itself, never from the registry, so a
+credential changed from outside gets repaired rather than misreported. Both rules exist because their
+absence destroyed real accounts during development.
 
-One structural limit is worth stating plainly: each tool has exactly one credential slot, so two live
-sessions cannot hold different accounts — whichever refreshes its token last wins for both. Claude on
-one account and Codex on another is fine; two Claude Code sessions on two accounts is not.
-
-## How it works
-
-The two tools store credentials differently, so `accsw` swaps whatever each one actually reads.
-
-**Claude Code** keeps its OAuth credential in the macOS keychain. The service name is
-`Claude Code-credentials`, optionally suffixed with the first eight hex characters of
-`sha256(CLAUDE_CONFIG_DIR)` — so a config dir *does* namespace the item, but with that variable unset
-there is exactly one global item keyed to your macOS username. A profile parks its blob in its own
-keychain item, `accsw-claude-<profile>`, and switching copies it back into the canonical one. The
-`oauthAccount` key of `~/.claude.json` is swapped alongside it so the identity metadata matches.
-
-The binary does contain a plaintext `.credentials.json` backend, and it is tempting — but it is
-unreachable on macOS: reads try the keychain first, and a successful keychain write *deletes* that
-file. It is a degradation mode, not a configuration, so keychain swapping is the only stable path.
-
-**Codex** keeps its credential in `$CODEX_HOME/auth.json`, a plain file. A profile is a copy of that
-file, and switching writes it back.
-
-Both mechanisms are on-disk or in-keychain state rather than environment variables, on purpose: IDE
-extensions spawn their agent as a native process that never inherits your shell environment, so an
-env-var approach would work in the terminal and silently fail in the editor.
-
-## What is deliberately not swapped
-
-Sessions, history, projects, MCP config, plugins. Those are workspace, not identity — you want them
-to follow you across accounts, and they weigh about 11 GB. Only the credential and the identity
-metadata move.
-
-## Guard rails
-
-Switching warns when processes of that tool are already running, but never blocks. IDE extensions
-keep a host process alive for as long as the editor is open, so "is it running" is nearly always yes
-— a hard block would only train you to bypass it. The consequence is bounded and worth knowing: a
-live session keeps working on its in-memory token, but when it refreshes it rewrites the shared
-credential slot, so the next process to start may pick up the account you just switched away from.
-
-Profiles are additive: `save` never touches the live login, and `rm` only forgets a profile — it
-never logs anything out.
-
-## Storage
-
-- `~/.config/accsw/registry.json` — profile names, emails, identity metadata (mode 600)
-- `~/.config/accsw/codex/<profile>.json` — per-profile Codex credential (mode 600)
-- keychain item `accsw-claude-<profile>` — per-profile Claude credential
-
-Override the location with `ACCSW_HOME`.
-
-## How it protects the thing it is holding
-
-Credentials are the whole point, so the handling is deliberate:
-
-- **No diagnostic can leak the payload.** `security` echoes its arguments when it fails, so any of its
-  output carrying the credential — or the credential's hex — is dropped rather than interpolated into
-  an error message. This is not theoretical: it is how an earlier version printed 8 KB of live
-  credential to a terminal.
-- **Hex round-trips are decoded.** `security -w` returns hex whenever the stored bytes are not
-  printable ASCII. Storing that hex verbatim and writing it back would leave the canonical item
-  holding an unparseable string — a bricked login. It is detected and decoded.
-- **Writes are verified.** Every keychain write is read back and compared before anything downstream
-  is allowed to proceed.
-- **Every write is atomic.** Registry, `auth.json` and `~/.claude.json` are written to a temp file
-  created at mode 600, fsynced, then `os.replace`d. No truncation window, no world-readable window.
-- **Nothing is ever only in the slot.** Every command parks whatever is signed in into a profile
-  before doing anything else, so switching is a swap rather than a one-way restore. Without that, a
-  profile's stored blob goes stale as its session refreshes, and switching back would write a dead
-  refresh token — a browser re-login, which is the exact thing this tool exists to avoid. It also
-  means a login made outside accsw is picked up on its own. `ACCSW_ABSORB=0` disables it.
-- **Every leg is checked before any byte is written**, so a switch cannot half-apply.
-- **A failed keychain read is not "no credential".** Only exit 44 means absent; a locked keychain or
-  a denied ACL raises, instead of advising a recapture that would overwrite a good parked blob.
-- **Quota reads are sequential**, not a burst of simultaneous authenticated requests for several
-  accounts from one address.
-- **Redirects are refused.** `urllib` copies headers onto a redirected request without comparing
-  hosts, so following one would hand a live access token to whatever host answered.
-
-## Requirements
-
-macOS, Python 3. No third-party packages.
+`security` echoes its arguments when it fails, so no diagnostic that contains a credential is ever
+printed. Every keychain write is read back and compared, and every file is written to a temp file at
+mode 600 and renamed into place.
 
 ## Tests
 
 ```
-python3 tests/test_quota.py     # 66 checks — parsing, rollover, hex, naming, selection, display
-python3 tests/test_picker.py    # 11 checks — the picker driven through a real pty
-python3 tests/test_keychain.py  # 9 checks  — an 8 KB blob round-tripped through the real keychain
+python3 tests/test_quota.py      window parsing, ranking, renewal, naming
+python3 tests/test_keychain.py   an 8 KB blob round-tripped through the real keychain
 ```
 
-None touches a real credential: the quota tests replace the HTTP layer with canned payloads shaped
-like the real responses, the picker tests run against a throwaway store, and the keychain test writes
-a fake blob of realistic size to a throwaway service. That last one exists because size is what broke
-an earlier write mechanism — it passed every small-string test, then printed an 8 KB credential to the
-terminal the first time it met a real one.
+Neither reaches the network: `ACCSW_OFFLINE=1` makes any real call raise, and both suites set it.
+
+## Knowingly
+
+Owning several accounts you pay for is your business. Rotating between them specifically to get
+around a rate limit is what Anthropic's usage policy calls circumventing limits, and they have
+enforced it by suspension. This tool makes switching easy; what you switch for is your call.
