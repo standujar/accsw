@@ -450,11 +450,8 @@ CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 HTTP_TIMEOUT = 6
 
-# Claude reports one window per scope; these are the ones worth showing.
-CLAUDE_WINDOWS = {
-    "five_hour": "5h",
-    "seven_day": "7d",
-}
+# The unscoped windows get short names; anything model-scoped is named after its model.
+CLAUDE_WINDOWS = {"session": "5h", "weekly_all": "7d"}
 
 
 def http_get_json(url: str, token: str) -> dict:
@@ -544,16 +541,24 @@ def live_token(tool: str) -> str:
 
 
 def claude_quota(token: str) -> list[tuple[str, float, int | None]]:
+    """Read the `limits` array, not the flat five_hour/seven_day keys.
+
+    Those two are only the unscoped windows. The per-model ones live here — and a
+    model-scoped limit is routinely the binding one: an account can read 99% free on
+    its 5h window while Fable sits at 100%, which is exactly the account auto-select
+    must not pick.
+    """
     payload = http_get_json(CLAUDE_USAGE_URL, token)
     windows = []
-    for key, label in CLAUDE_WINDOWS.items():
-        window = payload.get(key)
-        if not isinstance(window, dict):
-            continue
-        percent = window.get("utilization", window.get("percent"))
+    for entry in payload.get("limits") or []:
+        percent = entry.get("percent")
         if percent is None:
             continue
-        windows.append((label, float(percent), parse_epoch(window.get("resets_at"))))
+        label = CLAUDE_WINDOWS.get(entry.get("kind"))
+        if label is None:
+            model = ((entry.get("scope") or {}).get("model") or {}).get("display_name")
+            label = model or entry.get("kind") or "?"
+        windows.append((label, float(percent), parse_epoch(entry.get("resets_at"))))
     return windows
 
 
@@ -572,19 +577,25 @@ def codex_quota(token: str) -> list[tuple[str, float, int | None]]:
     Each window carries used_percent, its own length, and an absolute reset_at.
     """
     payload = http_get_json(CODEX_USAGE_URL, token)
-    limits = payload.get("rate_limit") or {}
     windows = []
-    for key in ("primary_window", "secondary_window"):
-        window = limits.get(key)
-        if not isinstance(window, dict):
-            continue
-        windows.append(
-            (
-                window_label(window.get("limit_window_seconds")),
-                float(window.get("used_percent", 0.0)),
-                parse_epoch(window.get("reset_at")),
+
+    def collect(limit: dict, name: str | None) -> None:
+        for key in ("primary_window", "secondary_window"):
+            window = limit.get(key)
+            if not isinstance(window, dict):
+                continue
+            windows.append(
+                (
+                    name or window_label(window.get("limit_window_seconds")),
+                    float(window.get("used_percent", 0.0)),
+                    parse_epoch(window.get("reset_at")),
+                )
             )
-        )
+
+    collect(payload.get("rate_limit") or {}, None)
+    # Per-model caps sit apart, and one of them is routinely the binding limit.
+    for extra in payload.get("additional_rate_limits") or []:
+        collect(extra.get("rate_limit") or {}, extra.get("limit_name"))
     return windows
 
 
@@ -674,13 +685,14 @@ def quota_lines(result, colour: bool) -> list[str]:
         return [paint(f"— {result}", "31", colour)]
     if not result:
         return ["— no window reported"]
+    width = max(len(label) for label, _, _ in result)
     lines = []
     for label, percent, resets_at in result:
         left = 100.0 - effective_percent(percent, resets_at)
         countdown = humanize_reset(resets_at)
         when = f"resets in {countdown}" if countdown else "just reset"
         lines.append(
-            f"{label:<3} {paint(bar(left), remaining_colour(left), colour)} "
+            f"{label:<{width}} {paint(bar(left), remaining_colour(left), colour)} "
             f"{left:>3.0f}% left   {paint(when, '2', colour)}"
         )
     return lines
@@ -1008,30 +1020,27 @@ def cmd_list(args) -> int:
 
 def cmd_status(args) -> int:
     registry = load_state()
+    profiles = registry["profiles"]
+    if not profiles:
+        print("no accounts captured yet — log in to one and run accsw")
+        return 0
     active = registry.get("active", {})
     colour = sys.stdout.isatty()
-    for position, tool in enumerate(TOOLS):
+    quota = gather_quota(registry)
+    for position, name in enumerate(sorted(profiles)):
         if position:
             print()
-        live = LIVE_IDENTITY[tool]()
-        aside = []
-        if active.get(tool):
-            aside.append(active[tool])
-        processes = running(tool)
-        if processes:
-            # Mostly IDE extension hosts and the desktop app, not chat sessions.
-            aside.append(f"{len(processes)} processes")
-        tail = paint("   " + " · ".join(aside), "2", colour) if aside else ""
-        print(f"{tool:<7} {live or paint('not signed in', '2', colour)}{tail}")
-        if live is None:
-            continue
-        try:
-            windows = QUOTA[tool](live_token(tool))
-        except Fail as error:
-            print(f"        {paint(f'— {error}', '31', colour)}")
-            continue
-        for line in quota_lines(windows, colour):
-            print(f"        {line}")
+        loaded = [tool for tool in TOOLS if active.get(tool) == name]
+        title = name if not loaded else paint(name, "1", colour)
+        print(f"{title}{paint('   loaded: ' + ', '.join(loaded), '2', colour) if loaded else ''}")
+        for tool in TOOLS:
+            if tool not in profiles[name]:
+                continue
+            mark = "●" if active.get(tool) == name else "○"
+            email = profiles[name][tool].get("email") or "unknown"
+            print(f"  {mark} {tool:<7} {paint(email, '2', colour)}")
+            for line in quota_lines(quota.get((name, tool)), colour):
+                print(f"      {line}")
     return 0
 
 

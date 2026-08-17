@@ -61,20 +61,34 @@ check("full", accsw.bar(100), "█" * 10)
 check("over 100 clamps", accsw.bar(140), "█" * 10)
 check("negative clamps", accsw.bar(-5), "░" * 10)
 
-print("claude payloads map to windows")
+print("claude reads the limits array, including model-scoped windows")
 accsw.http_get_json = lambda url, token: {
-    "five_hour": {"utilization": 38.0, "resets_at": now + 2 * HOUR},
-    "seven_day": {"utilization": 71.5, "resets_at": now + 3 * DAY},
-    "seven_day_opus": {"utilization": 90.0, "resets_at": now + 3 * DAY},
+    "five_hour": {"utilization": 1.0, "resets_at": None},
+    "limits": [
+        {"kind": "session", "percent": 1, "resets_at": now + 2 * HOUR, "scope": None},
+        {"kind": "weekly_all", "percent": 52, "resets_at": now + 3 * DAY, "scope": None},
+        {
+            "kind": "weekly_scoped",
+            "percent": 100,
+            "severity": "critical",
+            "resets_at": now + 3 * DAY,
+            "scope": {"model": {"display_name": "Fable"}},
+            "is_active": True,
+        },
+    ],
 }
 windows = accsw.claude_quota("token")
-check("two windows kept", [label for label, _, _ in windows], ["5h", "7d"])
-check("percent read", [percent for _, percent, _ in windows], [38.0, 71.5])
-check_that("reset carried", all(ts is not None for _, _, ts in windows))
+check("unscoped windows get short names", [w[0] for w in windows][:2], ["5h", "7d"])
+check("the scoped one is named after its model", windows[2][0], "Fable")
+check("a maxed model leaves no headroom", accsw.headroom(windows), 0.0)
 
-print("claude 'percent' spelling is accepted too")
-accsw.http_get_json = lambda url, token: {"five_hour": {"percent": 12.0, "resets_at": now + 600}}
-check("percent fallback", accsw.claude_quota("token")[0][1], 12.0)
+print("a model-scoped limit is what auto-select must see")
+registry_scoped = {"profiles": {"fresh": {"claude": {}}, "maxed": {"claude": {}}}, "active": {}}
+scoped = {
+    ("fresh", "claude"): [("5h", 10.0, None), ("Fable", 20.0, None)],
+    ("maxed", "claude"): [("5h", 1.0, None), ("Fable", 100.0, None)],
+}
+check("looks-fresh-but-maxed is rejected", accsw.best_profile(registry_scoped, scoped)[0], "fresh")
 
 print("windows are named by their own declared length")
 check("five hours", accsw.window_label(5 * HOUR), "5h")
@@ -177,8 +191,8 @@ check_that(
 print("status lines are aligned, one per window, and colour-free when not a terminal")
 lines = accsw.quota_lines([("5h", 38.0, now + 2 * HOUR), ("7d", 90.0, now + 3 * DAY)], False)
 check("one line per window", len(lines), 2)
-check("first line", lines[0], "5h  ██████░░░░  62% left   resets in 2h")
-check("second line", lines[1], "7d  █░░░░░░░░░  10% left   resets in 3d")
+check("first line", lines[0], "5h ██████░░░░  62% left   resets in 2h")
+check("second line", lines[1], "7d █░░░░░░░░░  10% left   resets in 3d")
 check_that("no escape codes without a terminal", ESC not in "".join(lines) if (ESC := "\x1b") else False)
 check("a just-reset window says so", accsw.quota_lines([("7d", 90.0, None)], False)[0].endswith("just reset"), True)
 
