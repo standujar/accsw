@@ -328,6 +328,22 @@ def credential_owner(tool: str, blob: str) -> str | None:
     return claude_oauth_identity(claude_access_token(blob))["emailAddress"]
 
 
+def actually_loaded(tool: str, registry: dict) -> str | None:
+    """The profile whose bytes are really in the slot, not the one the registry claims.
+
+    The two drift: a credential can be removed, refreshed, or replaced by something
+    outside accsw. Trusting the record meant an empty slot could be reported as
+    "already on X" forever, and never repaired.
+    """
+    live = live_blob(tool)
+    if live is None:
+        return None
+    for name in registry["profiles"]:
+        if parked_blob(tool, name) == live:
+            return name
+    return None
+
+
 def absorb_live(registry: dict) -> list[str]:
     """Park whatever is signed in right now, under a name derived from the account.
 
@@ -1051,12 +1067,12 @@ def apply_switch(profile: str, tools: tuple[str, ...], registry: dict) -> list[s
 
     outcome = []
     for tool in tools:
-        if registry.get("active", {}).get(tool) == profile:
-            outcome.append(f"{tool}: already loaded")
+        if actually_loaded(tool, registry) == profile:
+            outcome.append("already loaded")
             continue
         email = RESTORE[tool](profile, registry)
         save_registry(registry)
-        outcome.append(f"{tool}: {email}")
+        outcome.append(email)
     return outcome
 
 
@@ -1138,7 +1154,7 @@ def cmd_auto(args) -> int:
         if name is None:
             note(f"{tool}: {why}")
             continue
-        if registry.get("active", {}).get(tool) == name:
+        if actually_loaded(tool, registry) == name:
             print(f"{tool}: staying on {name} — {why}")
             # The credential was already right, but the app may not be: placing it is
             # part of being on an account, not a side effect of changing one.

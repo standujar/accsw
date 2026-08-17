@@ -193,6 +193,20 @@ check("only unscoped windows block",
       [label for label, _ in accsw.blocking([("Fable", 100.0, None), ("5h", 100.0, None)])], ["5h"])
 check("a spent model alone blocks nothing", accsw.blocking([("Fable", 100.0, None)]), [])
 
+print("what is loaded is read from the slot, never from the record")
+import tempfile as _tmp, pathlib as _pl
+store = _pl.Path(_tmp.mkdtemp())
+accsw.CODEX_VAULT = store / "codex"
+accsw.CODEX_VAULT.mkdir(parents=True)
+accsw.CODEX_AUTH = store / "auth.json"
+reg_live = {"profiles": {"one": {"codex": {}}, "two": {"codex": {}}}, "active": {"codex": "one"}}
+(accsw.CODEX_VAULT / "one.json").write_text('{"tokens": {"id_token": "a"}}')
+(accsw.CODEX_VAULT / "two.json").write_text('{"tokens": {"id_token": "b"}}')
+check("an empty slot loads nothing, whatever the record says",
+      accsw.actually_loaded("codex", reg_live), None)
+accsw.CODEX_AUTH.write_text('{"tokens": {"id_token": "b"}}')
+check("the slot names its real owner", accsw.actually_loaded("codex", reg_live), "two")
+
 print("headroom is free capacity in the tightest window")
 check("tightest wins", accsw.headroom([("5h", 38.0, None), ("7d", 71.5, None)]), 28.5)
 check("errors have no headroom", accsw.headroom(accsw.Fail("expired")), None)
