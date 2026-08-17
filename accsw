@@ -1321,11 +1321,10 @@ def cmd_auto(args) -> int:
             note(f"{tool}: {why}")
             continue
         if actually_loaded(tool, registry) == name:
+            # Nothing changed, so nothing is touched. Bouncing a window to land on the
+            # account it is already on is pure interruption — and when every account is
+            # spent, that is every single run.
             print(f"{tool}: staying on {name} — {why}")
-            # The credential was already right, but the app may not be: placing it is
-            # part of being on an account, not a side effect of changing one.
-            settle_readers((tool,), args.restart, name, registry)
-            save_registry(registry)
             continue
         for line in apply_switch(name, (tool,), registry):
             print(f"{tool}: {line}")
