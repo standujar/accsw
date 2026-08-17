@@ -328,6 +328,13 @@ def credential_owner(tool: str, blob: str) -> str | None:
     return claude_oauth_identity(claude_access_token(blob))["emailAddress"]
 
 
+def fresher(candidate: str, other: str) -> bool:
+    """Is `candidate` a later sign-in than `other`? Unknown expiry never wins."""
+    left = codex_token_expiry(candidate)
+    right = codex_token_expiry(other)
+    return left is not None and right is not None and left > right
+
+
 def actually_loaded(tool: str, registry: dict) -> str | None:
     """The profile whose bytes are really in the slot, not the one the registry claims.
 
@@ -371,8 +378,16 @@ def absorb_live(registry: dict) -> list[str]:
             continue
         name = name_for(email, tool, registry)
         known = registry["profiles"].get(name, {}).get(tool)
-        if known and parked_blob(tool, name) == live:
+        parked = parked_blob(tool, name)
+        if known and parked == live:
             registry.setdefault("active", {})[tool] = name
+            continue
+        if tool == "codex" and parked is not None and fresher(parked, live):
+            # The locker holds a newer sign-in than the slot — a freshly added account
+            # whose credential has not been installed yet. Absorbing here would
+            # overwrite it with the older one and undo the sign-in.
+            RESTORE[tool](name, registry)
+            absorbed.append(f"{tool}: installed the newer sign-in for {name}")
             continue
         CAPTURE[tool](name, registry, replace=True)
         absorbed.append(f"{tool}: {email} → {name}")
@@ -536,9 +551,12 @@ def restore_codex(profile: str, registry: dict) -> str:
     if left is not None and left <= 300:
         renewed = refresh_codex(blob)
         if renewed is None:
-            note(
-                f"{profile}'s Codex sign-in has expired and could not be renewed — "
-                "`accsw add codex` will sign it in again"
+            # Remember it: a grant that cannot be renewed will not renew itself, and
+            # retrying costs a rotation every time. Cleared by `accsw add`.
+            stored["needs_signin"] = True
+            save_registry(registry)
+            raise Fail(
+                f"{profile}'s Codex sign-in is dead — `accsw add codex` will sign it in again"
             )
         else:
             # Both copies, together: the old refresh token is dead the moment this
@@ -978,7 +996,11 @@ def best_profile(
     labels: dict[str, str | None] = {}
     ranked = []
     for name, entry in registry["profiles"].items():
-        relevant = [tool for tool in tools if tool in entry]
+        relevant = [
+            tool
+            for tool in tools
+            if tool in entry and not entry[tool].get("needs_signin")
+        ]
         if not relevant:
             continue
         keys = [selection_key(quota.get((name, tool)), tool, len(tools) == 1) for tool in relevant]
@@ -1305,6 +1327,7 @@ def cmd_add(args) -> int:
         )
 
     name = name_for(email, tool, registry)
+    registry["profiles"].setdefault(name, {}).pop(tool, None)
     if tool == "codex":
         CODEX_VAULT.mkdir(parents=True, exist_ok=True)
         CODEX_VAULT.chmod(0o700)
