@@ -657,7 +657,9 @@ def hold_lock() -> object:
     return handle
 
 
-RENEW_MARGIN = 900
+# Half an hour, to match the agent's cadence: the Codex id_token lives about an
+# hour, so a narrower margin lets a copy sit expired between two runs.
+RENEW_MARGIN = 1800
 
 
 def renew_parked(registry: dict) -> list[str]:
@@ -1353,7 +1355,7 @@ def cmd_status(args) -> int:
 
 AGENT_LABEL = "com.standujar.accsw"
 AGENT_PLIST = HOME / "Library" / "LaunchAgents" / f"{AGENT_LABEL}.plist"
-RENEW_EVERY = 3600
+RENEW_EVERY = 1800
 
 
 def ensure_agent(registry: dict) -> bool:
@@ -1628,7 +1630,15 @@ def main() -> int:
     if getattr(args, "agent", None):
         args.handler = cmd_agent
     try:
-        with hold_lock():
+        try:
+            lock = hold_lock()
+        except Fail:
+            # The background agent must stay silent about this: it will simply try
+            # again on its next tick, and a log full of contention hides real faults.
+            if args.handler is cmd_renew:
+                return 0
+            raise
+        with lock:
             return args.handler(args)
     except Fail as error:
         print(f"accsw: {error}", file=sys.stderr)
