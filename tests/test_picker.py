@@ -98,20 +98,20 @@ def main() -> int:
     results.append(check("says cancelled", "cancelled" in screen, screen[-200:]))
 
     print("enter selects the active profile by default")
-    screen = drive([ENTER], ["use", "--force"])
+    screen = drive([ENTER], ["use"])
     results.append(check("selected alpha", "alpha" in screen, screen[-200:]))
 
     print("down arrow moves the selection")
-    screen = drive([DOWN, ENTER], ["use", "--force"])
+    screen = drive([DOWN, ENTER], ["use"])
     results.append(check("selected bravo", "bravo" in screen, screen[-200:]))
     results.append(check("did not select alpha", "'alpha'" not in screen, screen[-200:]))
 
     print("wraps around past the last row")
-    screen = drive([UP, ENTER], ["use", "--force"])
+    screen = drive([UP, ENTER], ["use"])
     results.append(check("selected charlie", "charlie" in screen, screen[-200:]))
 
     print("j/k navigate like vim")
-    screen = drive([b"j", b"j", ENTER], ["use", "--force"])
+    screen = drive([b"j", b"j", ENTER], ["use"])
     results.append(check("selected charlie via j", "charlie" in screen, screen[-200:]))
 
     print("non-tty refuses instead of hanging")

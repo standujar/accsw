@@ -762,19 +762,21 @@ def selected_tools(args) -> tuple[str, ...]:
     return (args.tool,) if args.tool else TOOLS
 
 
-def guard_running(tools: tuple[str, ...], force: bool) -> None:
+def warn_running(tools: tuple[str, ...]) -> None:
+    """Warn, never block.
+
+    IDE extensions keep a host process alive for as long as the editor is open, so
+    "is it running" is nearly always yes and a hard block would just train you to
+    bypass it. The real consequence is bounded: a live session keeps working on its
+    in-memory token, but when it refreshes it rewrites the shared credential slot, so
+    the next process to start may pick up the account you just switched away from.
+    """
     busy = {tool: running(tool) for tool in tools}
     busy = {tool: pids for tool, pids in busy.items() if pids}
     if not busy:
         return
-    listed = ", ".join(f"{tool} ({len(pids)})" for tool, pids in busy.items())
-    if force:
-        print(f"warning: {listed} still running — the switch may be overwritten on refresh")
-        return
-    raise Fail(
-        f"running right now: {listed}. A live session can refresh its own token and "
-        "silently put the old account back. Quit it, or pass --force."
-    )
+    listed = ", ".join(f"{len(pids)} {tool}" for tool, pids in busy.items())
+    note(f"{listed} already running — they may rewrite the slot when their token refreshes")
 
 
 def apply_switch(profile: str, tools: tuple[str, ...], registry: dict) -> list[str]:
@@ -833,8 +835,7 @@ def cmd_use(args) -> int:
     tools = tuple(tool for tool in wanted if tool in entry)
     if not tools:
         raise Fail(f"profile {args.profile!r} holds no account for {', '.join(wanted)}")
-    guard_running(tools, args.force)
-
+    warn_running(tools)
     switched = apply_switch(args.profile, tools, registry)
     print(f"switched to {args.profile!r}")
     for line in switched:
@@ -850,12 +851,7 @@ def cmd_run(args) -> int:
     if binary is None:
         raise Fail(f"{tool} is not on PATH")
 
-    pids = running(tool)
-    if pids:
-        # One global credential per tool means two live sessions cannot hold different
-        # accounts — whichever refreshes last wins for both. So never switch underneath one.
-        note(f"{tool} already running ({len(pids)}) — staying on the loaded account")
-    elif not registry["profiles"]:
+    if not registry["profiles"]:
         note("no profiles captured yet — run `accsw save`")
     else:
         quota = gather_quota(registry, (tool,))
@@ -865,6 +861,7 @@ def cmd_run(args) -> int:
         elif registry.get("active", {}).get(tool) == name:
             note(f"{tool} already on {name} — {why}")
         else:
+            warn_running((tool,))
             apply_switch(name, (tool,), registry)
             note(f"switched {tool} to {name} — {why}")
 
@@ -907,8 +904,10 @@ def cmd_status(args) -> int:
         aside = []
         if active.get(tool):
             aside.append(active[tool])
-        if running(tool):
-            aside.append(f"{len(running(tool))} running")
+        processes = running(tool)
+        if processes:
+            # Mostly IDE extension hosts and the desktop app, not chat sessions.
+            aside.append(f"{len(processes)} processes")
         tail = paint("   " + " · ".join(aside), "2", colour) if aside else ""
         print(f"{tool:<7} {live or paint('not signed in', '2', colour)}{tail}")
         if live is None:
@@ -966,7 +965,7 @@ def cmd_rm(args) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(prog="accsw", description=__doc__.splitlines()[0])
     subparsers = parser.add_subparsers(dest="command")
-    parser.set_defaults(handler=cmd_use, profile=None, tool=None, force=False)
+    parser.set_defaults(handler=cmd_use, profile=None, tool=None)
 
     tool_flag = dict(choices=TOOLS, help="act on one tool only (default: both)")
 
@@ -985,11 +984,6 @@ def main() -> int:
     use = subparsers.add_parser("use", help="switch to a captured account")
     use.add_argument("profile", nargs="?", help="omit to pick from a menu")
     use.add_argument("--tool", **tool_flag)
-    use.add_argument(
-        "--force",
-        action="store_true",
-        help="switch even if a session of that tool is running",
-    )
     use.set_defaults(handler=cmd_use)
 
     listing = subparsers.add_parser("list", help="list captured profiles")
@@ -1007,11 +1001,6 @@ def main() -> int:
 
     auto = subparsers.add_parser("auto", help="switch to the account with the most headroom")
     auto.add_argument("--tool", **tool_flag)
-    auto.add_argument(
-        "--force",
-        action="store_true",
-        help="switch even if a session of that tool is running",
-    )
     auto.set_defaults(handler=cmd_auto)
 
     remove = subparsers.add_parser("rm", help="forget a profile")

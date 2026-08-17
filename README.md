@@ -94,9 +94,11 @@ metadata move.
 
 ## Guard rails
 
-`use` refuses to run while a session of that tool is live, because a running session can refresh its
-own token and silently put the previous account back. Quit it, or pass `--force` if you know what
-you're doing.
+Switching warns when processes of that tool are already running, but never blocks. IDE extensions
+keep a host process alive for as long as the editor is open, so "is it running" is nearly always yes
+— a hard block would only train you to bypass it. The consequence is bounded and worth knowing: a
+live session keeps working on its in-memory token, but when it refreshes it rewrites the shared
+credential slot, so the next process to start may pick up the account you just switched away from.
 
 Profiles are additive: `save` never touches the live login, and `rm` only forgets a profile — it
 never logs anything out.
