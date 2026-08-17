@@ -315,6 +315,11 @@ check("unknown reset keeps its number", accsw.effective_percent(38.0, None), 38.
 print("failures are surfaced verbatim")
 check("error text shown", accsw.quota_lines(accsw.Fail("token expired"), False), ["— token expired"])
 
+print("a caller-given width aligns windows whose labels differ in length")
+narrow = accsw.quota_lines([("7d", 10.0, None)], False, 5)
+check("padded to the wider label", narrow[0].startswith("7d    "), True)
+check("and left alone without one", accsw.quota_lines([("7d", 10.0, None)], False)[0].startswith("7d █"), True)
+
 print("status lines are aligned, one per window, and colour-free when not a terminal")
 lines = accsw.quota_lines([("5h", 38.0, now + 2 * HOUR), ("7d", 90.0, now + 3 * DAY)], False)
 check("one line per window", len(lines), 2)

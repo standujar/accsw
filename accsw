@@ -945,7 +945,7 @@ def remaining_colour(left: float) -> str:
     return "33" if left >= 20 else "31"
 
 
-def quota_lines(result, colour: bool) -> list[str]:
+def quota_lines(result, colour: bool, width: int | None = None) -> list[str]:
     """One aligned line per window, coloured by how much is left.
 
     An exhausted window is reported alone: showing "5h 100% left" beside a spent
@@ -961,7 +961,7 @@ def quota_lines(result, colour: bool) -> list[str]:
     result = [
         window for window in result if not (window[0] == "5h" and spent - {"5h"})
     ]
-    width = max(len(label) for label, _, _ in result)
+    width = width or max(len(label) for label, _, _ in result)
     lines = []
     for label, percent, resets_at in result:
         left = 100.0 - effective_percent(percent, resets_at)
@@ -1273,6 +1273,15 @@ def cmd_status(args) -> int:
     # Written back, or the five-minute cache and the Retry-After backoff would last
     # exactly as long as this process and re-ask the moment you look again.
     save_registry(registry)
+    # One width for the whole view: per-result widths made Claude's bars, which sit
+    # behind a five-letter model name, start further right than Codex's.
+    labels = [
+        len(label)
+        for result in quota.values()
+        if not isinstance(result, Fail)
+        for label, _, _ in result
+    ]
+    width = max(labels, default=2)
     for position, name in enumerate(sorted(profiles)):
         if position:
             print()
@@ -1296,7 +1305,7 @@ def cmd_status(args) -> int:
                 f"{paint(email, DIM, colour)}{flag}"
             )
             age = ages.get((name, tool))
-            for line in quota_lines(quota.get((name, tool)), colour):
+            for line in quota_lines(quota.get((name, tool)), colour, width):
                 print(f"      {line}")
             if age is not None:
                 print(f"      {paint(f'(rate limited — figures from {humanize_reset(int(time.time()) + age)} ago)', '2', colour)}")
