@@ -159,6 +159,23 @@ try:
 except pristine.Fail as error:
     check_that("refuses to reach the network", "offline" in str(error), str(error))
 
+print("a credential names itself; a neighbouring file never speaks for it")
+accsw.http_get_json = lambda url, token: {
+    "account": {"email": "real@owner.com", "uuid": "u-1"},
+    "organization": {"uuid": "o-1", "name": "Org", "organization_type": "claude_max"},
+}
+blob = '{"claudeAiOauth": {"accessToken": "tok"}}'
+check("claude asks the API who this credential is",
+      accsw.credential_owner("claude", blob), "real@owner.com")
+check("and keeps the account metadata with it",
+      accsw.claude_oauth_identity("tok")["organizationType"], "claude_max")
+
+import base64 as _b64, json as _json
+claims = _b64.urlsafe_b64encode(_json.dumps({"email": "codex@owner.com"}).encode()).decode().rstrip("=")
+codex_blob = _json.dumps({"tokens": {"id_token": f"h.{claims}.s"}})
+check("codex reads the address out of the credential it is filing",
+      accsw.credential_owner("codex", codex_blob), "codex@owner.com")
+
 print("headroom is free capacity in the tightest window")
 check("tightest wins", accsw.headroom([("5h", 38.0, None), ("7d", 71.5, None)]), 28.5)
 check("errors have no headroom", accsw.headroom(accsw.Fail("expired")), None)

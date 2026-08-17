@@ -315,6 +315,19 @@ def parked_blob(tool: str, profile: str) -> str | None:
     return read_file(CODEX_VAULT / f"{profile}.json")
 
 
+def credential_owner(tool: str, blob: str) -> str | None:
+    """Who a credential actually belongs to, asked of the credential itself.
+
+    Never inferred from ~/.claude.json: that file and the keychain drift apart
+    constantly — a live session refreshes the keychain while the file still names
+    the previous account — and trusting it filed one account's token under another
+    account's name, silently destroying the credentials it was meant to protect.
+    """
+    if tool == "codex":
+        return jwt_email((json.loads(blob).get("tokens") or {}).get("id_token"))
+    return claude_oauth_identity(claude_access_token(blob))["emailAddress"]
+
+
 def absorb_live(registry: dict) -> list[str]:
     """Park whatever is signed in right now, under a name derived from the account.
 
@@ -328,18 +341,21 @@ def absorb_live(registry: dict) -> list[str]:
         return []
     absorbed = []
     for tool in TOOLS:
-        email = LIVE_IDENTITY[tool]()
-        if email is None:
-            continue
         live = live_blob(tool)
         if live is None:
             continue
+        recorded = registry.get("active", {}).get(tool)
+        if recorded and parked_blob(tool, recorded) == live:
+            continue
+        try:
+            email = credential_owner(tool, live)
+        except (Fail, json.JSONDecodeError, KeyError):
+            continue
+        if email is None:
+            continue
         name = name_for(email, tool, registry)
-        recorded = registry["profiles"].get(name, {}).get(tool)
-        # The shortcut needs BOTH halves: matching bytes in the locker and an entry
-        # describing them. With only the first, `active` would name a profile that
-        # `list` cannot show and `use` cannot restore.
-        if recorded and parked_blob(tool, name) == live:
+        known = registry["profiles"].get(name, {}).get(tool)
+        if known and parked_blob(tool, name) == live:
             registry.setdefault("active", {})[tool] = name
             continue
         CAPTURE[tool](name, registry, replace=True)
@@ -366,12 +382,8 @@ def capture_claude(profile: str, registry: dict, replace: bool = False) -> str:
         raise Fail(
             "no Claude Code credential in the keychain — run `claude` and log in first"
         )
-    account = claude_oauth_account()
-    if account is None:
-        raise Fail(
-            "Claude Code has no oauthAccount in ~/.claude.json — start it once before capturing"
-        )
-    email = account.get("emailAddress")
+    account = claude_oauth_identity(claude_access_token(secret))
+    email = account["emailAddress"]
     guard_rebind(profile, "claude", registry, email, replace)
     keychain_write(profile_service(profile), secret, f"accsw claude — {profile}")
     entry = registry["profiles"].setdefault(profile, {})
@@ -383,7 +395,7 @@ def capture_claude(profile: str, registry: dict, replace: bool = False) -> str:
 def capture_codex(profile: str, registry: dict, replace: bool = False) -> str:
     if not CODEX_AUTH.is_file():
         raise Fail(f"no Codex credential at {CODEX_AUTH} — run `codex login` first")
-    email = codex_identity()
+    email = credential_owner("codex", CODEX_AUTH.read_text(encoding="utf-8"))
     guard_rebind(profile, "codex", registry, email, replace)
     CODEX_VAULT.mkdir(parents=True, exist_ok=True)
     CODEX_VAULT.chmod(0o700)
