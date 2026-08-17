@@ -472,10 +472,74 @@ def preflight_codex(profile: str, registry: dict) -> None:
 def restore_claude(profile: str, registry: dict) -> str:
     stored = registry["profiles"][profile]["claude"]
     secret = keychain_read(profile_service(profile))
+    left = claude_token_expiry(secret)
+    if left is not None and left <= 300:
+        renewed = refresh_claude(secret)
+        if renewed is None:
+            stored["needs_signin"] = True
+            save_registry(registry)
+            raise Fail(
+                f"{profile}'s Claude sign-in is dead — `accsw add claude` will sign it in again"
+            )
+        # Both copies together: the refresh token that produced this is now spent.
+        keychain_write(profile_service(profile), renewed, f"accsw claude — {profile}")
+        secret = renewed
+        note(f"renewed {profile}'s Claude sign-in")
     keychain_write(CLAUDE_KEYCHAIN_SERVICE, secret, "Claude Code")
     set_claude_oauth_account(stored["oauthAccount"])
     registry.setdefault("active", {})["claude"] = profile
     return stored.get("email") or "unknown"
+
+
+CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+
+
+def claude_token_expiry(blob: str) -> float | None:
+    """Seconds left on the access token, from the expiresAt the blob carries in ms."""
+    expiry = json.loads(blob).get("claudeAiOauth", {}).get("expiresAt")
+    return None if not expiry else expiry / 1000 - time.time()
+
+
+def refresh_claude(blob: str) -> str | None:
+    """Trade the refresh token for a fresh set. Returns None if the grant is dead.
+
+    JSON body and a scope list, unlike Codex's form-encoded call — both shapes were
+    read out of the clients that own them rather than guessed.
+    """
+    import urllib.error
+    import urllib.request
+
+    payload = json.loads(blob)
+    oauth = payload.get("claudeAiOauth") or {}
+    if not oauth.get("refreshToken"):
+        return None
+    if os.environ.get("ACCSW_OFFLINE") == "1":
+        raise Fail("offline: refused to call platform.claude.com")
+    body = json.dumps(
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": oauth["refreshToken"],
+            "client_id": CLAUDE_CLIENT_ID,
+            "scope": " ".join(oauth.get("scopes") or []),
+        }
+    ).encode()
+    request = urllib.request.Request(
+        CLAUDE_TOKEN_URL, data=body, headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
+            granted = json.loads(response.read())
+    except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError):
+        return None
+    if granted.get("access_token"):
+        oauth["accessToken"] = granted["access_token"]
+    if granted.get("refresh_token"):
+        oauth["refreshToken"] = granted["refresh_token"]
+    if granted.get("expires_in"):
+        oauth["expiresAt"] = int((time.time() + granted["expires_in"]) * 1000)
+    payload["claudeAiOauth"] = oauth
+    return json.dumps(payload)
 
 
 CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"

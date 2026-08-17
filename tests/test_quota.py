@@ -218,6 +218,19 @@ except accsw.Fail as error:
 check("an id_token an hour old is treated as due",
       accsw.codex_token_expiry('{"tokens": {"id_token": "not.a.jwt"}}'), None)
 
+print("claude sign-ins are renewed on the same rule as codex")
+check("no refresh token means nothing to renew",
+      accsw.refresh_claude('{"claudeAiOauth": {"accessToken": "a"}}'), None)
+try:
+    accsw.refresh_claude('{"claudeAiOauth": {"refreshToken": "r", "scopes": ["user:profile"]}}')
+    check_that("claude renewal obeys the offline guard", False, "it made a call")
+except accsw.Fail as error:
+    check_that("claude renewal obeys the offline guard", "offline" in str(error), str(error))
+check("expiry is read from expiresAt in milliseconds",
+      round(accsw.claude_token_expiry('{"claudeAiOauth": {"expiresAt": %d}}' % ((time.time() + 600) * 1000)) / 60),
+      10)
+check("a blob with no expiry has none", accsw.claude_token_expiry('{"claudeAiOauth": {}}'), None)
+
 print("headroom is free capacity in the tightest window")
 check("tightest wins", accsw.headroom([("5h", 38.0, None), ("7d", 71.5, None)]), 28.5)
 check("errors have no headroom", accsw.headroom(accsw.Fail("expired")), None)
