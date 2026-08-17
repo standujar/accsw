@@ -587,6 +587,9 @@ def refresh_codex(blob: str) -> str | None:
     return json.dumps(payload, indent=2)
 
 
+
+REFRESH = {"claude": lambda blob: refresh_claude(blob), "codex": lambda blob: refresh_codex(blob)}
+
 def codex_token_expiry(blob: str) -> float | None:
     """Seconds left on the id_token, which lives about an hour — far less than the
     access token's ten days. A parked copy older than that is refused by the app."""
@@ -652,6 +655,54 @@ def hold_lock() -> object:
         handle.close()
         raise Fail("another accsw is running — wait for it to finish")
     return handle
+
+
+RENEW_MARGIN = 900
+
+
+def renew_parked(registry: dict) -> list[str]:
+    """Keep the accounts you are NOT using alive.
+
+    A grant has one valid refresh token at a time, so whoever refreshes last holds
+    it. A parked copy left to age loses that race to any process still running on
+    the old credential, and dies with no way back. Renewing it here makes accsw the
+    last holder instead.
+
+    Only accounts that are not loaded: the live one is being refreshed by the tool
+    that owns it, and absorbing re-parks it. Touching that one would take the token
+    out from under a session that is legitimately using it.
+    """
+    active = registry.get("active", {})
+    renewed = []
+    for name, entry in registry["profiles"].items():
+        for tool in TOOLS:
+            stored = entry.get(tool)
+            if stored is None or stored.get("needs_signin") or active.get(tool) == name:
+                continue
+            blob = parked_blob(tool, name)
+            if blob is None:
+                continue
+            left = token_expiry(tool, blob)
+            if left is None or left > RENEW_MARGIN:
+                continue
+            try:
+                fresh = REFRESH[tool](blob)
+            except Unreachable:
+                continue
+            if fresh is None:
+                stored["needs_signin"] = True
+                renewed.append(f"{name}/{tool}: refused, sign in again")
+                continue
+            park_blob(tool, name, fresh)
+            renewed.append(f"{name}/{tool}")
+    return renewed
+
+
+def park_blob(tool: str, profile: str, blob: str) -> None:
+    if tool == "claude":
+        keychain_write(profile_service(profile), blob, f"accsw claude — {profile}")
+    else:
+        atomic_write(CODEX_VAULT / f"{profile}.json", blob)
 
 
 def load_state() -> dict:
@@ -1299,6 +1350,10 @@ def cmd_auto(args) -> int:
     registry = load_state()
     if not registry["profiles"]:
         raise Fail("no accounts captured yet — log in to one and run accsw")
+    kept = renew_parked(registry)
+    if kept:
+        save_registry(registry)
+        note(f"renewed while idle: {', '.join(kept)}")
     tools = TOOLS
     quota, _ = gather_quota(registry, tools)
     for tool in tools:
