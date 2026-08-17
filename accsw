@@ -1277,17 +1277,29 @@ def cmd_list(args) -> int:
     active = registry.get("active", {})
     colour = sys.stdout.isatty()
     width = max(len(name) for name in profiles)
+    emails = [
+        len(entry[tool].get("email") or "unknown")
+        for entry in profiles.values()
+        for tool in TOOLS
+        if tool in entry
+    ]
+    cell = max(emails, default=8)
     for name in sorted(profiles):
-        held = []
+        # A fixed cell per tool, printed empty when a profile has no account for it,
+        # so every column starts in the same place whatever the address lengths are.
+        columns = []
         for tool in TOOLS:
             if tool not in profiles[name]:
+                columns.append(" " * (cell + len(tool) + 3))
                 continue
             mark = paint("●", LOADED, colour) if active.get(tool) == name else paint("○", DIM, colour)
-            held.append(
+            email = profiles[name][tool].get("email") or "unknown"
+            flag = paint(" !", "31", colour) if profiles[name][tool].get("needs_signin") else ""
+            columns.append(
                 f"{mark} {paint(tool, TOOL_COLOUR[tool], colour)} "
-                f"{paint(profiles[name][tool].get('email') or 'unknown', DIM, colour)}"
+                f"{paint(f'{email:<{cell}}', DIM, colour)}{flag}"
             )
-        print(f"{name:<{width}}  " + "   ".join(held))
+        print(f"{name:<{width}}   " + "  ".join(columns).rstrip())
     return 0
 
 
