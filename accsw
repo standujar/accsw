@@ -478,12 +478,12 @@ def refresh_codex(blob: str) -> str | None:
     import urllib.parse
     import urllib.request
 
-    if os.environ.get("ACCSW_OFFLINE") == "1":
-        raise Fail("offline: refused to call auth.openai.com")
     payload = json.loads(blob)
     tokens = payload.get("tokens") or {}
     if not tokens.get("refresh_token"):
         return None
+    if os.environ.get("ACCSW_OFFLINE") == "1":
+        raise Fail("offline: refused to call auth.openai.com")
     body = urllib.parse.urlencode(
         {
             "grant_type": "refresh_token",
