@@ -176,6 +176,14 @@ codex_blob = _json.dumps({"tokens": {"id_token": f"h.{claims}.s"}})
 check("codex reads the address out of the credential it is filing",
       accsw.credential_owner("codex", codex_blob), "codex@owner.com")
 
+print("the 5h line is dropped when the week is spent, since it can buy nothing")
+spent_week = [("5h", 0.0, None), ("7d", 100.0, None), ("Fable", 100.0, None)]
+labels = [line.split()[0] for line in accsw.quota_lines(spent_week, False)]
+check("5h is hidden behind a spent week", labels, ["7d", "Fable"])
+open_week = [("5h", 0.0, None), ("7d", 10.0, None)]
+check("and kept when the week still has room",
+      [line.split()[0] for line in accsw.quota_lines(open_week, False)], ["5h", "7d"])
+
 print("a spent weekly window disqualifies; a spent model does not")
 block = {"profiles": {"open": {"claude": {}}, "weekly": {"claude": {}}}, "active": {}}
 cases = {

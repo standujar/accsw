@@ -772,13 +772,12 @@ def quota_lines(result, colour: bool) -> list[str]:
         return [paint(f"— {result}", "31", colour)]
     if not result:
         return ["— no window reported"]
-    spent = blocking(result)
-    if spent:
-        names = " and ".join(label for label, _ in spent)
-        back = min((at for _, at in spent if at is not None), default=None)
-        countdown = humanize_reset(back)
-        when = f"back in {countdown}" if countdown else "reset due"
-        return [paint(f"out of quota — {names} spent, {when}", "31", colour)]
+    # A spent week makes the 5h window meaningless: it can read 100% and buy nothing.
+    # Drop that one line rather than the whole gauge — the rest still says something.
+    spent = {label for label, _ in (blocking(result) or [])}
+    result = [
+        window for window in result if not (window[0] == "5h" and spent - {"5h"})
+    ]
     width = max(len(label) for label, _, _ in result)
     lines = []
     for label, percent, resets_at in result:
