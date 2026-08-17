@@ -83,6 +83,16 @@ try:
     message = accsw.diagnose(echoed, FAKE)
     check("hex payload never reaches the message", FAKE.encode().hex() not in message, message[:80])
     check("says why it was withheld", "withheld" in message, message)
+    print("and withheld even when the output was wrapped into fragments")
+    hexed = FAKE.encode().hex()
+    wrapped = subprocess.CompletedProcess(
+        args=[], returncode=1, stdout="",
+        stderr=f'unknown command "{hexed[400:520]}" unknown command "{hexed[520:640]}"',
+    )
+    fragmented = accsw.diagnose(wrapped, FAKE)
+    check("no fragment of the payload survives", "withheld" in fragmented, fragmented[:90])
+    check("nor any hex of it", hexed[400:432] not in fragmented, fragmented[:90])
+
     clean = subprocess.CompletedProcess(args=[], returncode=51, stdout="", stderr="auth failure")
     check("ordinary stderr still surfaces", accsw.diagnose(clean) == "auth failure")
 finally:

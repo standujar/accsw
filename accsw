@@ -25,6 +25,7 @@ import json
 import os
 import pwd
 import shutil
+import datetime
 import subprocess
 import sys
 import tempfile
@@ -44,7 +45,7 @@ CODEX_HOME = Path(os.environ.get("CODEX_HOME", HOME / ".codex"))
 CODEX_AUTH = CODEX_HOME / "auth.json"
 
 TOOLS = ("claude", "codex")
-PROCESS_NAMES = {"claude": ("claude", "claude.exe"), "codex": ("codex",)}
+PROCESS_NAMES = {"claude": ("claude",), "codex": ("codex",)}
 
 
 class Fail(Exception):
@@ -106,8 +107,14 @@ def diagnose(result: subprocess.CompletedProcess, secret: str | None = None) -> 
     Never interpolate it raw. Anything carrying the payload — or its hex — is dropped.
     """
     text = " ".join(result.stderr.split())
-    if secret and (secret in text or secret.encode("utf-8").hex() in text):
-        return "(diagnostic withheld: it contained the credential)"
+    if secret:
+        hexed = secret.encode("utf-8").hex()
+        # Wrapped output carries fragments, not the whole payload, so containment
+        # alone would pass the very case this exists for: any long run of hex, or
+        # any slice of the secret, is enough to refuse.
+        fragments = (hexed[i : i + 32] for i in range(0, len(hexed), 32))
+        if secret in text or any(piece and piece in text for piece in fragments):
+            return "(diagnostic withheld: it contained the credential)"
     return text[:200] or f"exit {result.returncode}"
 
 
@@ -218,18 +225,6 @@ def running(tool: str) -> list[int]:
 # ------------------------------------------------------------------ identity
 
 
-def claude_identity() -> str | None:
-    account = claude_oauth_account()
-    return account.get("emailAddress") if account else None
-
-
-def codex_identity() -> str | None:
-    """Read the email claim out of the stored id_token. The token is never printed."""
-    if not CODEX_AUTH.is_file():
-        return None
-    payload = read_json(CODEX_AUTH)
-    # `tokens` is present but null in API-key mode, so `.get("tokens", {})` is not enough.
-    return jwt_email((payload.get("tokens") or {}).get("id_token") or payload.get("id_token"))
 
 
 def jwt_email(token) -> str | None:
@@ -245,12 +240,6 @@ def jwt_email(token) -> str | None:
     except (ValueError, json.JSONDecodeError):
         return None
 
-
-def claude_oauth_account() -> dict | None:
-    if not CLAUDE_STATE.is_file():
-        return None
-    account = read_json(CLAUDE_STATE).get("oauthAccount")
-    return account if isinstance(account, dict) else None
 
 
 def set_claude_oauth_account(account: dict) -> None:
@@ -357,7 +346,7 @@ def absorb_live(registry: dict) -> list[str]:
             continue
         try:
             email = credential_owner(tool, live)
-        except (Fail, json.JSONDecodeError, KeyError):
+        except (Fail, json.JSONDecodeError):
             continue
         if email is None:
             continue
@@ -374,25 +363,15 @@ def absorb_live(registry: dict) -> list[str]:
             RESTORE[tool](name, registry)
             absorbed.append(f"{tool}: installed the newer sign-in for {name}")
             continue
-        CAPTURE[tool](name, registry, replace=True)
+        CAPTURE[tool](name, registry)
         absorbed.append(f"{tool}: {email} → {name}")
     return absorbed
 
 
 
 
-def guard_rebind(profile: str, tool: str, registry: dict, email: str | None, replace: bool) -> None:
-    known = registry["profiles"].get(profile, {}).get(tool)
-    if not known or replace:
-        return
-    if known.get("email") and email and known["email"] != email:
-        raise Fail(
-            f"profile {profile!r} holds {known['email']} for {tool}, but {email} is logged in "
-            "— pass --replace to rebind it"
-        )
 
-
-def capture_claude(profile: str, registry: dict, replace: bool = False) -> str:
+def capture_claude(profile: str, registry: dict) -> str:
     secret = keychain_read(CLAUDE_KEYCHAIN_SERVICE)
     if secret is None:
         raise Fail(
@@ -400,7 +379,6 @@ def capture_claude(profile: str, registry: dict, replace: bool = False) -> str:
         )
     account = claude_oauth_identity(claude_access_token(secret))
     email = account["emailAddress"]
-    guard_rebind(profile, "claude", registry, email, replace)
     keychain_write(profile_service(profile), secret, f"accsw claude — {profile}")
     entry = registry["profiles"].setdefault(profile, {})
     entry["claude"] = {"email": email, "oauthAccount": account}
@@ -408,11 +386,10 @@ def capture_claude(profile: str, registry: dict, replace: bool = False) -> str:
     return email or "unknown"
 
 
-def capture_codex(profile: str, registry: dict, replace: bool = False) -> str:
+def capture_codex(profile: str, registry: dict) -> str:
     if not CODEX_AUTH.is_file():
         raise Fail(f"no Codex credential at {CODEX_AUTH} — run `codex login` first")
     email = credential_owner("codex", CODEX_AUTH.read_text(encoding="utf-8"))
-    guard_rebind(profile, "codex", registry, email, replace)
     CODEX_VAULT.mkdir(parents=True, exist_ok=True)
     CODEX_VAULT.chmod(0o700)
     atomic_write(CODEX_VAULT / f"{profile}.json", CODEX_AUTH.read_text(encoding="utf-8"))
@@ -433,12 +410,12 @@ def preflight_claude(profile: str, registry: dict) -> None:
     if not stored.get("oauthAccount"):
         raise Fail(
             f"profile {profile!r} was captured without its identity — "
-            f"recapture it with `accsw save {profile} --tool claude --replace`"
+            f"sign it in again with `accsw add claude`"
         )
     secret = keychain_read(profile_service(profile))
     if secret is None:
         raise Fail(
-            f"profile {profile!r} lost its keychain item — recapture with `accsw save {profile}`"
+            f"profile {profile!r} lost its keychain item — `accsw add claude` will restore it"
         )
     json.loads(secret)
     if not CLAUDE_STATE.is_file():
@@ -464,7 +441,7 @@ def restore_claude(profile: str, registry: dict) -> str:
             stored["needs_signin"] = True
             save_registry(registry)
             raise Fail(
-                f"{profile}'s Claude sign-in is dead — `accsw add claude` will sign it in again"
+                f"{profile}'s Claude sign-in was refused — `accsw add claude` will sign it in again"
             )
         # Both copies together: the refresh token that produced this is now spent.
         keychain_write(profile_service(profile), renewed, f"accsw claude — {profile}")
@@ -474,6 +451,33 @@ def restore_claude(profile: str, registry: dict) -> str:
     set_claude_oauth_account(stored["oauthAccount"])
     registry.setdefault("active", {})["claude"] = profile
     return stored.get("email") or "unknown"
+
+
+class Unreachable(Fail):
+    """The token endpoint could not be asked — which says nothing about the grant."""
+
+
+def token_grant(request) -> dict:
+    """POST a token request. An empty dict means the grant was refused.
+
+    A refusal and an unreachable endpoint are different facts and must not collapse
+    into one: the first retires an account, the second is a bad minute of wifi.
+    """
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
+            granted = json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        if error.code in (400, 401, 403):
+            return {}
+        raise Unreachable(f"token endpoint returned {error.code}")
+    except urllib.error.URLError as error:
+        raise Unreachable(f"token endpoint unreachable ({error.reason})")
+    except json.JSONDecodeError:
+        raise Unreachable("token endpoint returned something that is not JSON")
+    return granted if isinstance(granted, dict) else {}
 
 
 CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
@@ -512,13 +516,13 @@ def refresh_claude(blob: str) -> str | None:
     request = urllib.request.Request(
         CLAUDE_TOKEN_URL, data=body, headers={"Content-Type": "application/json"}
     )
-    try:
-        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
-            granted = json.loads(response.read())
-    except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError):
+    granted = token_grant(request)
+    if not granted.get("access_token"):
+        # A 200 carrying {"error": "invalid_grant"} satisfies none of the fields we
+        # came for. Returning the untouched blob would report a renewal and install
+        # the expired credential it was meant to replace.
         return None
-    if granted.get("access_token"):
-        oauth["accessToken"] = granted["access_token"]
+    oauth["accessToken"] = granted["access_token"]
     if granted.get("refresh_token"):
         oauth["refreshToken"] = granted["refresh_token"]
     if granted.get("expires_in"):
@@ -560,18 +564,16 @@ def refresh_codex(blob: str) -> str | None:
         data=body,
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
-    try:
-        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
-            granted = json.loads(response.read())
-    except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError):
+    granted = token_grant(request)
+    if not granted.get("access_token") or not granted.get("id_token"):
+        # id_token included on purpose: it carries the expiry the app checks, so a
+        # grant without one cannot be stamped as fresh.
         return None
     for field in ("id_token", "access_token", "refresh_token"):
         if granted.get(field):
             tokens[field] = granted[field]
     payload["tokens"] = tokens
-    payload["last_refresh"] = (
-        __import__("datetime").datetime.now(__import__("datetime").UTC).isoformat()
-    )
+    payload["last_refresh"] = datetime.datetime.now(datetime.UTC).isoformat()
     return json.dumps(payload, indent=2)
 
 
@@ -621,7 +623,6 @@ def restore_codex(profile: str, registry: dict) -> str:
 CAPTURE = {"claude": capture_claude, "codex": capture_codex}
 RESTORE = {"claude": restore_claude, "codex": restore_codex}
 PREFLIGHT = {"claude": preflight_claude, "codex": preflight_codex}
-LIVE_IDENTITY = {"claude": claude_identity, "codex": codex_identity}
 
 
 def load_state() -> dict:
@@ -973,22 +974,20 @@ def blocking(result) -> list[tuple[str, int | None]] | None:
     ]
 
 
-def selection_key(result, tool: str, single: bool = True) -> tuple[float, ...] | None:
+def selection_key(result, tool: str) -> tuple[float, ...] | None:
     """Remaining capacity in priority order. Compared highest-first, so a tie on
     Fable falls through to the 5h window, then to the week."""
     left = remaining_by_label(result)
     if left is None:
         return None
-    spent = blocking(result)
-    if spent:
-        # Exhausted on any window: unusable whatever the others say, so it sorts below
-        # every account that still has room, without needing a special case downstream.
-        return (-1.0,) * (len(SELECTION_ORDER.get(tool) or ()) or 1)
     order = SELECTION_ORDER.get(tool)
-    if not order or not single:
-        # Priority keys only compare within one tool: a three-window Claude key and a
-        # one-window Codex key are not the same measurement. Across tools, fall back
-        # to the scalar that is comparable — the tightest window.
+    width = len(order) if order else 1
+    if blocking(result):
+        # Exhausted on an unscoped window: unusable whatever the rest says. Same
+        # width as every other key for this tool — tuples of different lengths
+        # compare by prefix, so a shorter one would sort ahead of a healthy account.
+        return (-1.0,) * width
+    if not order:
         return (min(left.values()),)
     return tuple(left.get(label, 100.0) for label in order)
 
@@ -1014,43 +1013,30 @@ ESC = "\x1b"
 
 
 
-def best_profile(
-    registry: dict, quota: dict, tools: tuple[str, ...] = TOOLS
-) -> tuple[str | None, str]:
-    """The account whose most-constrained window is least used. Ties keep the active one.
+def best_profile(registry: dict, quota: dict, tool: str) -> tuple[str | None, str]:
+    """The account with the most left for ONE tool. Ties keep whatever is loaded.
 
-    An account whose quota could not be read is still eligible, ranked last. A stale
-    access token is not a dead account — the tool refreshes it on first use — and
-    skipping it outright meant a perfectly usable account could never be chosen.
+    One tool at a time on purpose: the two slots are independent logins, and their
+    keys are not the same measurement — Claude ranks on three windows, Codex on one.
+    Comparing them merged is how an exhausted account outranks a usable one.
     """
     active = registry.get("active", {})
-    labels: dict[str, str | None] = {}
+    labels: dict[str, tuple[str, float] | None] = {}
     ranked = []
     for name, entry in registry["profiles"].items():
-        relevant = [
-            tool
-            for tool in tools
-            if tool in entry and not entry[tool].get("needs_signin")
-        ]
-        if not relevant:
+        if tool not in entry or entry[tool].get("needs_signin"):
             continue
-        keys = [selection_key(quota.get((name, tool)), tool, len(tools) == 1) for tool in relevant]
-        known = [key for key in keys if key is not None]
-        loaded = any(active.get(tool) == name for tool in tools)
-        margin = min(known) if known else None
-        decided = [deciding_window(quota.get((name, tool)), tool) for tool in relevant]
-        decided = [item for item in decided if item is not None]
-        labels[name] = min(decided, key=lambda item: item[1]) if decided else None
-        # Reachable first. An account whose quota cannot be read is also an account
-        # whose credential we could not prove works, and switching onto it is how a
-        # dead token reaches the slot.
-        ranked.append((0 if margin is None else 1, margin or (0.0,), loaded, name))
+        key = selection_key(quota.get((name, tool)), tool)
+        labels[name] = deciding_window(quota.get((name, tool)), tool)
+        # Reachable first: an account whose quota cannot be read is one whose
+        # credential we could not prove works, and switching onto it is how a dead
+        # token reaches the slot.
+        ranked.append((0 if key is None else 1, key or (0.0,), active.get(tool) == name, name))
     if not ranked:
         return None, "no account is captured for that tool"
-    # negate each element: the key is a tuple now, compared highest-first
     ranked.sort(key=lambda row: (-row[0], tuple(-value for value in row[1]), not row[2], row[3]))
-    measured, margin, _, name = ranked[0]
-    if measured:
+    measured, _, _, name = ranked[0]
+    if measured and labels[name]:
         label, value = labels[name]
         return name, f"{label} at {value:.0f}% left"
     return name, "no account answered; this one's token refreshes on first use"
@@ -1060,8 +1046,6 @@ def best_profile(
 # ----------------------------------------------------------------- commands
 
 
-def selected_tools(args) -> tuple[str, ...]:
-    return (args.tool,) if args.tool else TOOLS
 
 
 # Desktop apps that read the same credential slot — both verified to query it the
@@ -1141,6 +1125,12 @@ def launch_claude_app(profile: str) -> None:
 
 
 def app_running(name: str) -> bool:
+    """Raises rather than guessing.
+
+    Automation is gated behind a TCC grant, so a refusal comes back non-zero with
+    empty output. Reading that as "not running" would let the caller relink — or
+    rename — the support directory of an app that is very much running.
+    """
     result = run(
         [
             "osascript",
@@ -1148,7 +1138,13 @@ def app_running(name: str) -> bool:
             f'tell application "System Events" to (name of processes) contains "{name}"',
         ]
     )
-    return result.stdout.strip() == "true"
+    answer = result.stdout.strip()
+    if result.returncode != 0 or answer not in ("true", "false"):
+        raise Fail(
+            f"cannot tell whether {name} is running: {diagnose(result)}. "
+            "Grant Automation access to your terminal in System Settings → Privacy."
+        )
+    return answer == "true"
 
 
 def restart_app(name: str) -> None:
@@ -1162,9 +1158,7 @@ def note(message: str) -> None:
     print(f"accsw: {message}", file=sys.stderr)
 
 
-def settle_readers(
-    tools: tuple[str, ...], restart: bool, profile: str | None, registry: dict
-) -> None:
+def settle_readers(tools: tuple[str, ...], profile: str | None, registry: dict) -> None:
     """Put the desktop apps on the account that was just installed.
 
     ChatGPT.app reads $CODEX_HOME/auth.json — the very slot that was swapped — so a
@@ -1173,9 +1167,6 @@ def settle_readers(
     for tool in tools:
         name = GUI_APPS[tool]
         live = app_running(name)
-        if live and not restart:
-            note(f"{name} keeps the old account until you quit and reopen it")
-            continue
         if tool == "claude" and profile:
             # Already on this profile and running: leave it be.
             if live and registry.get("app_profile") == profile:
@@ -1250,6 +1241,9 @@ def cmd_status(args) -> int:
     active = registry.get("active", {})
     colour = sys.stdout.isatty()
     quota, ages = gather_quota(registry)
+    # Written back, or the five-minute cache and the Retry-After backoff would last
+    # exactly as long as this process and re-ask the moment you look again.
+    save_registry(registry)
     for position, name in enumerate(sorted(profiles)):
         if position:
             print()
@@ -1282,11 +1276,10 @@ def cmd_auto(args) -> int:
     registry = load_state()
     if not registry["profiles"]:
         raise Fail("no accounts captured yet — log in to one and run accsw")
-    tools = selected_tools(args)
+    tools = TOOLS
     quota, _ = gather_quota(registry, tools)
-    moved = False
     for tool in tools:
-        name, why = best_profile(registry, quota, (tool,))
+        name, why = best_profile(registry, quota, tool)
         if name is None:
             note(f"{tool}: {why}")
             continue
@@ -1296,18 +1289,19 @@ def cmd_auto(args) -> int:
             # spent, that is every single run. The link is still checked, because it
             # costs nothing and decides where a Dock launch lands.
             print(f"{tool}: staying on {name} — {why}")
-            if tool == "claude" and CLAUDE_BINARY.exists() and point_claude_app_at(name):
-                note(f"pointed Claude at {name}")
-                if app_running("Claude"):
-                    launch_claude_app(name)
+            if tool == "claude" and CLAUDE_BINARY.exists():
+                # Sampled first: relinking quits the app, so asking afterwards always
+                # answers "not running" and the window never comes back.
+                live = app_running("Claude")
+                if point_claude_app_at(name):
+                    note(f"pointed Claude at {name}")
+                    if live:
+                        launch_claude_app(name)
             continue
         for line in apply_switch(name, (tool,), registry):
             print(f"{tool}: {line}")
         print(f"  → {name}, {why}")
-        moved = True
         settle_readers((tool,), args.restart, name, registry)
-    if not moved:
-        return 0
     return 0
 
 
@@ -1335,6 +1329,15 @@ def cmd_add(args) -> int:
     tool = args.tool_name
     registry = load_state()
     workspace = Path(tempfile.mkdtemp(prefix="accsw-add-"))
+    try:
+        return complete_add(args, tool, registry, workspace)
+    finally:
+        # It holds a live credential the moment the sign-in succeeds, so it goes
+        # whatever happens after — including the failures that raise past here.
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def complete_add(args, tool: str, registry: dict, workspace: Path) -> int:
     print(f"signing in to a new {tool} account — the current one stays put\n")
 
     if tool == "codex":
@@ -1381,7 +1384,6 @@ def cmd_add(args) -> int:
         # sign-in the user just completed.
         keychain_delete(claude_namespaced_service(workspace))
     save_registry(registry)
-    shutil.rmtree(workspace, ignore_errors=True)
     print(f"\nadded {email} as {name!r} — `accsw` will use it when it has the most left")
     return 0
 
@@ -1391,9 +1393,8 @@ def cmd_add(args) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(prog="accsw", description=__doc__.splitlines()[0])
     subparsers = parser.add_subparsers(dest="command")
-    parser.set_defaults(handler=cmd_auto, profile=None, tool=None, restart=True)
+    parser.set_defaults(handler=cmd_auto)
 
-    tool_flag = dict(choices=TOOLS, help="act on one tool only (default: both)")
 
 
 

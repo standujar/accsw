@@ -90,7 +90,7 @@ scoped = {
     ("fresh", "claude"): [("5h", 10.0, None), ("Fable", 20.0, None)],
     ("maxed", "claude"): [("5h", 1.0, None), ("Fable", 100.0, None)],
 }
-check("looks-fresh-but-maxed is rejected", accsw.best_profile(registry_scoped, scoped)[0], "fresh")
+check("looks-fresh-but-maxed is rejected", accsw.best_profile(registry_scoped, scoped, "claude")[0], "fresh")
 
 print("windows are named by their own declared length")
 check("five hours", accsw.window_label(5 * HOUR), "5h")
@@ -127,13 +127,13 @@ fable = {
     ("a", "claude"): [("Fable", 60.0, None), ("5h", 90.0, None), ("7d", 10.0, None)],
     ("b", "claude"): [("Fable", 90.0, None), ("5h", 1.0, None), ("7d", 1.0, None)],
 }
-check("most Fable left wins despite a worse week", accsw.best_profile(prio, fable, ("claude",))[0], "a")
+check("most Fable left wins despite a worse week", accsw.best_profile(prio, fable, "claude")[0], "a")
 tied = {
     ("a", "claude"): [("Fable", 100.0, None), ("5h", 70.0, None), ("7d", 10.0, None)],
     ("b", "claude"): [("Fable", 100.0, None), ("5h", 20.0, None), ("7d", 5.0, None)],
 }
 check("all Fable spent falls through to the 5h window",
-      accsw.best_profile(prio, tied, ("claude",))[0], "b")
+      accsw.best_profile(prio, tied, "claude")[0], "b")
 check("the key is Fable, 5h, week in that order",
       accsw.selection_key([("7d", 10.0, None), ("Fable", 40.0, None)], "claude"),
       (60.0, 100.0, 90.0))
@@ -182,7 +182,7 @@ cases = {
     ("open", "claude"): [("5h", 90.0, None), ("7d", 90.0, None), ("Fable", 100.0, None)],
     ("weekly", "claude"): [("5h", 0.0, None), ("7d", 100.0, None), ("Fable", 0.0, None)],
 }
-check("a spent week loses to a spent model", accsw.best_profile(block, cases, ("claude",))[0], "open")
+check("a spent week loses to a spent model", accsw.best_profile(block, cases, "claude")[0], "open")
 check("only unscoped windows block",
       [label for label, _ in accsw.blocking([("Fable", 100.0, None), ("5h", 100.0, None)])], ["5h"])
 check("a spent model alone blocks nothing", accsw.blocking([("Fable", 100.0, None)]), [])
@@ -239,7 +239,7 @@ quota = {
     ("eliza", "claude"): [("7d", 80.0, None)],
     ("eliza", "codex"): [("7d", 5.0, None)],
 }
-name, why = accsw.best_profile(registry, quota)
+name, why = accsw.best_profile(registry, quota, "claude")
 check("picks the roomier account", name, "perso")
 check_that("names the binding window", why == "7d at 80% left", why)
 
@@ -250,8 +250,8 @@ tool_split = {
     ("eliza", "claude"): [("7d", 10.0, None)],
     ("eliza", "codex"): [("7d", 95.0, None)],
 }
-check("codex-only picks perso", accsw.best_profile(registry, tool_split, ("codex",))[0], "perso")
-check("claude-only picks eliza", accsw.best_profile(registry, tool_split, ("claude",))[0], "eliza")
+check("codex-only picks perso", accsw.best_profile(registry, tool_split, "codex")[0], "perso")
+check("claude-only picks eliza", accsw.best_profile(registry, tool_split, "claude")[0], "eliza")
 
 print("a tie keeps the account already loaded")
 quota_tied = {
@@ -260,7 +260,7 @@ quota_tied = {
     ("eliza", "claude"): [("7d", 50.0, None)],
     ("eliza", "codex"): [("7d", 50.0, None)],
 }
-check("no pointless switch", accsw.best_profile(registry, quota_tied)[0], "eliza")
+check("no pointless switch", accsw.best_profile(registry, quota_tied, "claude")[0], "eliza")
 
 print("accounts with no usable data are skipped, not chosen")
 quota_broken = {
@@ -269,22 +269,22 @@ quota_broken = {
     ("eliza", "claude"): [("7d", 99.0, None)],
     ("eliza", "codex"): [("7d", 99.0, None)],
 }
-check("prefers the account it could measure", accsw.best_profile(registry, quota_broken)[0], "eliza")
+check("prefers the account it could measure", accsw.best_profile(registry, quota_broken, "claude")[0], "eliza")
 
 print("an account we could read beats one we could not, even when it is tight")
 reg2 = {"profiles": {"tight": {"claude": {}}, "unknown": {"claude": {}}}, "active": {}}
 tiers = {("tight", "claude"): [("Fable", 100.0, None)], ("unknown", "claude"): accsw.Fail("HTTP 429")}
-check("unreadable never wins", accsw.best_profile(reg2, tiers)[0], "tight")
+check("unreadable never wins", accsw.best_profile(reg2, tiers, "claude")[0], "tight")
 check("roomy still beats tight",
       accsw.best_profile(reg2, {("tight", "claude"): [("Fable", 10.0, None)],
-                                ("unknown", "claude"): accsw.Fail("x")})[0], "tight")
+                                ("unknown", "claude"): accsw.Fail("x")}, "claude")[0], "tight")
 
 print("an unreadable account is ranked last, not discarded")
-name, why = accsw.best_profile(registry, {})
+name, why = accsw.best_profile(registry, {}, "claude")
 check_that("still returns a candidate", name in ("perso", "eliza"), repr(name))
 check_that("says the token refreshes on use", "refreshes on first use" in why, why)
 check("no captured profile for the tool returns nothing",
-      accsw.best_profile({"profiles": {}, "active": {}}, {})[0], None)
+      accsw.best_profile({"profiles": {}, "active": {}}, {}, "claude")[0], None)
 
 print("a window past its reset has rolled over, whatever the stored number said")
 check("future window keeps its number", accsw.effective_percent(38.0, now + HOUR), 38.0)
