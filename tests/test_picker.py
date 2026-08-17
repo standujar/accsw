@@ -88,7 +88,7 @@ def main() -> int:
     results = []
 
     print("picker renders every profile")
-    screen = drive([QUIT], ["use"])
+    screen = drive([QUIT], ["pick"])
     results.append(check("lists alpha", "alpha@example.com" in screen))
     results.append(check("lists bravo", "bravo@example.com" in screen))
     results.append(check("lists charlie", "charlie@example.com" in screen))
@@ -98,25 +98,25 @@ def main() -> int:
     results.append(check("says cancelled", "cancelled" in screen, screen[-200:]))
 
     print("enter selects the active profile by default")
-    screen = drive([ENTER], ["use"])
+    screen = drive([ENTER], ["pick"])
     results.append(check("selected alpha", "alpha" in screen, screen[-200:]))
 
     print("down arrow moves the selection")
-    screen = drive([DOWN, ENTER], ["use"])
+    screen = drive([DOWN, ENTER], ["pick"])
     results.append(check("selected bravo", "bravo" in screen, screen[-200:]))
     results.append(check("did not select alpha", "'alpha'" not in screen, screen[-200:]))
 
     print("wraps around past the last row")
-    screen = drive([UP, ENTER], ["use"])
+    screen = drive([UP, ENTER], ["pick"])
     results.append(check("selected charlie", "charlie" in screen, screen[-200:]))
 
     print("j/k navigate like vim")
-    screen = drive([b"j", b"j", ENTER], ["use"])
+    screen = drive([b"j", b"j", ENTER], ["pick"])
     results.append(check("selected charlie via j", "charlie" in screen, screen[-200:]))
 
     print("non-tty refuses instead of hanging")
     completed = subprocess.run(
-        [sys.executable, str(ACCSW), "use"],
+        [sys.executable, str(ACCSW), "pick"],
         capture_output=True,
         text=True,
         timeout=15,

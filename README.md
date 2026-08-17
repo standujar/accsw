@@ -5,10 +5,22 @@ Switch Claude Code and the Codex CLI between accounts without ever logging out.
 Capture each account once, then flip between them in a second. No re-auth, no device codes,
 no browser round-trip.
 
-Run it with no arguments and pick from the menu:
+Run it with no arguments and it puts you on the best account, completely — credential swapped and
+the desktop apps reopened on it. Nothing to name, no flag to remember:
 
 ```
 $ accsw
+switched to 'perso'
+  claude: stan@perso.com
+accsw: restarted Claude
+```
+
+It is a no-op when you are already on the roomiest account, so running it costs nothing.
+
+`accsw pick` opens the menu when you'd rather choose:
+
+```
+$ accsw pick
 switch account   ↑↓ move   ↵ select   a auto   q cancel
  ❯  eliza  ● claude  developer@elizalabs.ai     5h ████░░   62% 2h    7d ███░░░   29% 3d
            ● codex   dev@eliza.ai               5h █░░░░░   12% 45m   7d ░░░░░░    9% 5d
@@ -24,6 +36,7 @@ Or never think about it at all — launch through `run` and it lands on the room
 ```
 accsw run claude          # picks the account with the most left, switches, launches claude
 accsw run codex exec "…"  # arguments pass straight through
+accsw use perso --no-restart   # switch but leave the desktop apps alone
 ```
 
 Worth aliasing: `alias claude='accsw run claude'`.

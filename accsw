@@ -1078,7 +1078,7 @@ def cmd_rm(args) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(prog="accsw", description=__doc__.splitlines()[0])
     subparsers = parser.add_subparsers(dest="command")
-    parser.set_defaults(handler=cmd_use, profile=None, tool=None, restart=False)
+    parser.set_defaults(handler=cmd_auto, profile=None, tool=None, restart=True)
 
     tool_flag = dict(choices=TOOLS, help="act on one tool only (default: both)")
 
@@ -1098,11 +1098,17 @@ def main() -> int:
     use.add_argument("profile", nargs="?", help="omit to pick from a menu")
     use.add_argument("--tool", **tool_flag)
     use.add_argument(
-        "--restart",
-        action="store_true",
-        help="quit and reopen the desktop apps so they pick up the new account",
+        "--no-restart",
+        dest="restart",
+        action="store_false",
+        help="leave the desktop apps alone instead of reopening them",
     )
     use.set_defaults(handler=cmd_use)
+
+    pick = subparsers.add_parser("pick", help="choose an account from a menu")
+    pick.add_argument("--tool", **tool_flag)
+    pick.add_argument("--no-restart", dest="restart", action="store_false")
+    pick.set_defaults(handler=cmd_use, profile=None)
 
     listing = subparsers.add_parser("list", help="list captured profiles")
     listing.set_defaults(handler=cmd_list)
@@ -1120,9 +1126,10 @@ def main() -> int:
     auto = subparsers.add_parser("auto", help="switch to the account with the most headroom")
     auto.add_argument("--tool", **tool_flag)
     auto.add_argument(
-        "--restart",
-        action="store_true",
-        help="quit and reopen the desktop apps so they pick up the new account",
+        "--no-restart",
+        dest="restart",
+        action="store_false",
+        help="leave the desktop apps alone instead of reopening them",
     )
     auto.set_defaults(handler=cmd_auto)
 
