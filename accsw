@@ -1021,6 +1021,23 @@ def selection_key(result, tool: str) -> tuple[float, ...] | None:
     return tuple(left.get(label, 100.0) for label in order)
 
 
+def availability(name: str, entry: dict, quota: dict) -> float | None:
+    """Mean of what each tool has left, judged on the window that constrains it.
+
+    A display figure, not a ranking one: selection compares within a single tool,
+    because Claude's three windows and Codex's one are not the same measurement.
+    Averaging them is only defensible for deciding what to print first.
+    """
+    left = [
+        window[1]
+        for tool in TOOLS
+        if tool in entry
+        for window in (deciding_window(quota.get((name, tool)), tool),)
+        if window is not None
+    ]
+    return sum(left) / len(left) if left else None
+
+
 def deciding_window(result, tool: str) -> tuple[str, float] | None:
     """The first window this tool cares about that the account actually reports."""
     left = remaining_by_label(result)
@@ -1282,13 +1299,23 @@ def cmd_status(args) -> int:
         for label, _, _ in result
     ]
     width = max(labels, default=2)
-    for position, name in enumerate(sorted(profiles)):
+    order = sorted(
+        profiles,
+        # Roomiest first; accounts whose quota could not be read sit at the end,
+        # where they cannot be mistaken for empty ones.
+        key=lambda name: (availability(name, profiles[name], quota) is None,
+                          -(availability(name, profiles[name], quota) or 0.0),
+                          name),
+    )
+    for position, name in enumerate(order):
         if position:
             print()
         loaded = [tool for tool in TOOLS if active.get(tool) == name]
         title = paint(name, BOLD, colour) if loaded else name
         tag = paint("  in use", LOADED, colour) if loaded else ""
-        print(f"{title}{tag}")
+        mean = availability(name, profiles[name], quota)
+        share = paint(f"   {mean:.0f}% free on average", DIM, colour) if mean is not None else ""
+        print(f"{title}{tag}{share}")
         for tool in TOOLS:
             if tool not in profiles[name]:
                 continue

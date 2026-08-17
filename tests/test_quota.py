@@ -315,6 +315,19 @@ check("unknown reset keeps its number", accsw.effective_percent(38.0, None), 38.
 print("failures are surfaced verbatim")
 check("error text shown", accsw.quota_lines(accsw.Fail("token expired"), False), ["— token expired"])
 
+print("the display average is the mean of what constrains each tool")
+entry_both = {"claude": {}, "codex": {}}
+avg_quota = {
+    ("acc", "claude"): [("5h", 20.0, None), ("Fable", 40.0, None)],
+    ("acc", "codex"): [("7d", 50.0, None)],
+}
+# claude is constrained by Fable at 60% left, codex by its week at 50% -> 55
+check("mean of the deciding windows", accsw.availability("acc", entry_both, avg_quota), 55.0)
+check("a tool that answered nothing is left out of the mean",
+      accsw.availability("acc", entry_both, {("acc", "codex"): [("7d", 10.0, None)]}), 90.0)
+check("nothing readable means no figure at all",
+      accsw.availability("acc", entry_both, {}), None)
+
 print("a caller-given width aligns windows whose labels differ in length")
 narrow = accsw.quota_lines([("7d", 10.0, None)], False, 5)
 check("padded to the wider label", narrow[0].startswith("7d    "), True)
