@@ -763,11 +763,22 @@ def remaining_colour(left: float) -> str:
 
 
 def quota_lines(result, colour: bool) -> list[str]:
-    """One aligned line per window, coloured by how much is left."""
+    """One aligned line per window, coloured by how much is left.
+
+    An exhausted window is reported alone: showing "5h 100% left" beside a spent
+    weekly window reads as capacity that does not exist.
+    """
     if isinstance(result, Fail):
         return [paint(f"— {result}", "31", colour)]
     if not result:
         return ["— no window reported"]
+    spent = blocking(result)
+    if spent:
+        names = " and ".join(label for label, _ in spent)
+        back = min((at for _, at in spent if at is not None), default=None)
+        countdown = humanize_reset(back)
+        when = f"back in {countdown}" if countdown else "reset due"
+        return [paint(f"out of quota — {names} spent, {when}", "31", colour)]
     width = max(len(label) for label, _, _ in result)
     lines = []
     for label, percent, resets_at in result:
@@ -799,12 +810,32 @@ def remaining_by_label(result) -> dict[str, float] | None:
     return {label: 100.0 - effective_percent(percent, at) for label, percent, at in result}
 
 
+# Spending an unscoped window stops the account outright. Spending a model-scoped one
+# only stops that model, so it steers the choice instead of disqualifying the account.
+BLOCKING_LABELS = {"5h", "7d"}
+
+
+def blocking(result) -> list[tuple[str, int | None]] | None:
+    if isinstance(result, Fail) or not result:
+        return None
+    return [
+        (label, at)
+        for label, percent, at in result
+        if label in BLOCKING_LABELS and effective_percent(percent, at) >= 100.0
+    ]
+
+
 def selection_key(result, tool: str, single: bool = True) -> tuple[float, ...] | None:
     """Remaining capacity in priority order. Compared highest-first, so a tie on
     Fable falls through to the 5h window, then to the week."""
     left = remaining_by_label(result)
     if left is None:
         return None
+    spent = blocking(result)
+    if spent:
+        # Exhausted on any window: unusable whatever the others say, so it sorts below
+        # every account that still has room, without needing a special case downstream.
+        return (-1.0,) * (len(SELECTION_ORDER.get(tool) or ()) or 1)
     order = SELECTION_ORDER.get(tool)
     if not order or not single:
         # Priority keys only compare within one tool: a three-window Claude key and a

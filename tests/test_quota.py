@@ -176,6 +176,17 @@ codex_blob = _json.dumps({"tokens": {"id_token": f"h.{claims}.s"}})
 check("codex reads the address out of the credential it is filing",
       accsw.credential_owner("codex", codex_blob), "codex@owner.com")
 
+print("a spent weekly window disqualifies; a spent model does not")
+block = {"profiles": {"open": {"claude": {}}, "weekly": {"claude": {}}}, "active": {}}
+cases = {
+    ("open", "claude"): [("5h", 90.0, None), ("7d", 90.0, None), ("Fable", 100.0, None)],
+    ("weekly", "claude"): [("5h", 0.0, None), ("7d", 100.0, None), ("Fable", 0.0, None)],
+}
+check("a spent week loses to a spent model", accsw.best_profile(block, cases, ("claude",))[0], "open")
+check("only unscoped windows block",
+      [label for label, _ in accsw.blocking([("Fable", 100.0, None), ("5h", 100.0, None)])], ["5h"])
+check("a spent model alone blocks nothing", accsw.blocking([("Fable", 100.0, None)]), [])
+
 print("headroom is free capacity in the tightest window")
 check("tightest wins", accsw.headroom([("5h", 38.0, None), ("7d", 71.5, None)]), 28.5)
 check("errors have no headroom", accsw.headroom(accsw.Fail("expired")), None)
