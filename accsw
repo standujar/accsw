@@ -989,6 +989,11 @@ def restart_app(name: str) -> None:
     run(["open", "-a", name])
 
 
+def note(message: str) -> None:
+    """Chatter goes to stderr so it never pollutes piped output."""
+    print(f"accsw: {message}", file=sys.stderr)
+
+
 def settle_readers(
     tools: tuple[str, ...], restart: bool, profile: str | None, registry: dict
 ) -> None:
@@ -999,20 +1004,24 @@ def settle_readers(
     """
     for tool in tools:
         name = GUI_APPS[tool]
-        if not app_running(name):
-            continue
-        if not restart:
+        live = app_running(name)
+        if live and not restart:
             note(f"{name} keeps the old account until you quit and reopen it")
             continue
         if tool == "claude" and profile:
-            if registry.get("app_profile") == profile and app_running(name):
+            # Already on this profile and running: leave it be.
+            if live and registry.get("app_profile") == profile:
                 continue
             launch_claude_app(profile)
             registry["app_profile"] = profile
-            note(f"reopened {name} on {profile}")
-        else:
+            note(f"{'reopened' if live else 'opened'} {name} on {profile}")
+        elif live:
             restart_app(name)
             note(f"reopened {name}")
+        else:
+            # It reads the slot we just wrote, so simply starting it is enough.
+            run(["open", "-a", name])
+            note(f"opened {name}")
     for tool in tools:
         if running(tool):
             note(f"open {tool} sessions keep the old account; new ones start on the new one")
@@ -1131,6 +1140,10 @@ def cmd_auto(args) -> int:
             continue
         if registry.get("active", {}).get(tool) == name:
             print(f"{tool}: staying on {name} — {why}")
+            # The credential was already right, but the app may not be: placing it is
+            # part of being on an account, not a side effect of changing one.
+            settle_readers((tool,), args.restart, name, registry)
+            save_registry(registry)
             continue
         for line in apply_switch(name, (tool,), registry):
             print(f"{tool}: {line}")
