@@ -217,27 +217,6 @@ APP_VAULT = STORE / "appsession"
 EMAIL_PATTERN = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
 
 
-def claude_app_identity() -> str | None:
-    """Whose session the app currently holds, read out of its Local Storage.
-
-    Ambiguity is treated as unknown: guessing here would file a session under the
-    wrong account, and the whole point of the locker is that it never does that.
-    """
-    import re
-
-    storage = CLAUDE_APP_DIR / "Local Storage"
-    if not storage.is_dir():
-        return None
-    found: set[str] = set()
-    for path in storage.rglob("*"):
-        if not path.is_file():
-            continue
-        try:
-            found.update(re.findall(EMAIL_PATTERN, path.read_bytes().decode("latin-1")))
-        except OSError:
-            continue
-    real = {address for address in found if not address.endswith((".png", ".svg", ".js"))}
-    return real.pop() if len(real) == 1 else None
 
 
 def app_session_present() -> bool:
@@ -282,6 +261,20 @@ def restore_app_session(profile: str) -> None:
             shutil.copyfile(origin, target)
 
 
+def app_session_matches(profile: str) -> bool:
+    """Are the live cookies still the ones we parked under this name?
+
+    We cannot ask the app who it is signed in as, so this is how a stale binding is
+    caught: if the bytes moved, someone signed in elsewhere and the recorded owner
+    can no longer be trusted.
+    """
+    live = CLAUDE_APP_DIR / "Cookies"
+    parked = APP_VAULT / profile / "Cookies"
+    if not live.is_file() or not parked.is_file():
+        return False
+    return live.read_bytes() == parked.read_bytes()
+
+
 def switch_app_session(profile: str, registry: dict) -> bool:
     """Swap the desktop app onto `profile`, parking whatever it holds first."""
     if not app_session_present() or not (APP_VAULT / profile / "Cookies").is_file():
@@ -297,9 +290,17 @@ def switch_app_session(profile: str, registry: dict) -> bool:
             time.sleep(0.25)
         else:
             raise Fail("Claude did not quit; its session was left untouched")
-    holder = claude_app_identity()
-    if holder:
-        capture_app_session(name_for(holder, "claude", registry))
+    held = registry.get("app_session")
+    if held and not app_session_matches(held):
+        note(
+            f"the Claude app session changed since it was bound to {held!r} — "
+            "leaving it alone; run `accsw appbind <profile>` to file it correctly"
+        )
+        if was_running:
+            run(["open", "-a", "Claude"])
+        return False
+    if held:
+        capture_app_session(held)
     restore_app_session(profile)
     registry["app_session"] = profile
     if was_running:
@@ -433,24 +434,9 @@ def absorb_live(registry: dict) -> list[str]:
             continue
         CAPTURE[tool](name, registry, replace=True)
         absorbed.append(f"{tool}: {email} → {name}")
-    absorbed.extend(absorb_app_session(registry))
     return absorbed
 
 
-def absorb_app_session(registry: dict) -> list[str]:
-    """Park the desktop app's session — only while it is closed, since it holds SQLite open."""
-    if not app_session_present() or app_running("Claude"):
-        return []
-    holder = claude_app_identity()
-    if holder is None:
-        return []
-    name = name_for(holder, "claude", registry)
-    if registry.get("app_session") == name and (APP_VAULT / name / "Cookies").is_file():
-        return []
-    capture_app_session(name)
-    registry["app_session"] = name
-    registry["profiles"].setdefault(name, {})["claude_app"] = {"email": holder}
-    return [f"Claude app: {holder} → {name}"]
 
 
 def guard_rebind(profile: str, tool: str, registry: dict, email: str | None, replace: bool) -> None:
@@ -1201,6 +1187,20 @@ def cmd_status(args) -> int:
             print(f"  {mark} {tool:<7} {paint(email, '2', colour)}")
             for line in quota_lines(quota.get((name, tool)), colour):
                 print(f"      {line}")
+        if "claude_app" in profiles[name]:
+            held = registry.get("app_session") == name
+            mark = "●" if held and app_session_matches(name) else "○"
+            print(f"  {mark} app       {paint('desktop session parked', '2', colour)}")
+
+    if app_session_present():
+        held = registry.get("app_session")
+        if held and app_session_matches(held):
+            state = f"signed in as {held}"
+        elif held:
+            state = f"signed in as someone else since it was bound to {held} — `accsw appbind <profile>`"
+        else:
+            state = "not parked — quit it, then `accsw appbind <profile>`"
+        print(f"\nClaude app   {paint(state, '2', colour)}")
     return 0
 
 
@@ -1232,6 +1232,28 @@ def cmd_auto(args) -> int:
         settle_readers((tool,), args.restart, swapped)
     if not moved:
         return 0
+    return 0
+
+
+def cmd_appbind(args) -> int:
+    """Declare which account the desktop app is currently signed into.
+
+    Not inferred: the app rewrites its stores while running and keeps superseded
+    records, so a read can name the previous account with total confidence — and
+    filing a session under the wrong account is the one thing the locker must never do.
+    """
+    registry = load_state()
+    if args.profile not in registry["profiles"]:
+        raise Fail(f"unknown profile {args.profile!r} — see `accsw list`")
+    if not app_session_present():
+        raise Fail("the Claude app has no session on disk yet — sign in once first")
+    if app_running("Claude"):
+        raise Fail("quit the Claude app first: it holds its session database open")
+    capture_app_session(args.profile)
+    registry["app_session"] = args.profile
+    registry["profiles"][args.profile]["claude_app"] = {"email": args.email}
+    save_registry(registry)
+    print(f"the Claude app session is now parked as {args.profile!r}")
     return 0
 
 
@@ -1291,6 +1313,13 @@ def main() -> int:
     pick.add_argument("--tool", **tool_flag)
     pick.add_argument("--no-restart", dest="restart", action="store_false")
     pick.set_defaults(handler=cmd_use, profile=None)
+
+    bind = subparsers.add_parser(
+        "appbind", help="park the Claude app's current session under a profile"
+    )
+    bind.add_argument("profile")
+    bind.add_argument("--email", help="record which address it belongs to")
+    bind.set_defaults(handler=cmd_appbind)
 
     listing = subparsers.add_parser("list", help="list captured profiles")
     listing.set_defaults(handler=cmd_list)
