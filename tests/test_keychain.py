@@ -12,8 +12,11 @@ import importlib.machinery
 import importlib.util
 import json
 import subprocess
+import os
 import sys
 from pathlib import Path
+
+os.environ["ACCSW_OFFLINE"] = "1"  # no test may reach the network
 
 ACCSW = Path(__file__).resolve().parent.parent / "accsw"
 loader = importlib.machinery.SourceFileLoader("accsw", str(ACCSW))

@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import os
 import sys
 import time
 from pathlib import Path
+
+os.environ["ACCSW_OFFLINE"] = "1"  # no test may reach the network
 
 ACCSW = Path(__file__).resolve().parent.parent / "accsw"
 
@@ -125,6 +128,35 @@ check("formatted as a notice", accsw.format_quota([]), "— no window reported")
 print("the binding window is named, so a spent model does not read as a dead account")
 check("names the worst window", accsw.binding_window([("5h", 2.0, None), ("Fable", 100.0, None)]), ("Fable", 0.0))
 check("unknown has no binding window", accsw.binding_window(accsw.Fail("x")), None)
+
+print("claude is chosen on Fable first, then 5h, then the week")
+prio = {"profiles": {"a": {"claude": {}}, "b": {"claude": {}}}, "active": {}}
+fable = {
+    ("a", "claude"): [("Fable", 60.0, None), ("5h", 90.0, None), ("7d", 10.0, None)],
+    ("b", "claude"): [("Fable", 90.0, None), ("5h", 1.0, None), ("7d", 1.0, None)],
+}
+check("most Fable left wins despite a worse week", accsw.best_profile(prio, fable, ("claude",))[0], "a")
+tied = {
+    ("a", "claude"): [("Fable", 100.0, None), ("5h", 70.0, None), ("7d", 10.0, None)],
+    ("b", "claude"): [("Fable", 100.0, None), ("5h", 20.0, None), ("7d", 5.0, None)],
+}
+check("all Fable spent falls through to the 5h window",
+      accsw.best_profile(prio, tied, ("claude",))[0], "b")
+check("the key is Fable, 5h, week in that order",
+      accsw.selection_key([("7d", 10.0, None), ("Fable", 40.0, None)], "claude"),
+      (60.0, 100.0, 90.0))
+check("codex compares on its single window",
+      accsw.selection_key([("7d", 30.0, None)], "codex"), (70.0,))
+
+print("the offline guard makes a forgotten stub fail loudly")
+import importlib
+real = accsw.http_get_json
+try:
+    accsw.http_get_json = real  # the module-level ACCSW_OFFLINE=1 is what bites
+    accsw.http_get_json("https://api.anthropic.com/api/oauth/usage", "not-a-token")
+    check_that("refuses to reach the network", False, "it made a call")
+except accsw.Fail as error:
+    check_that("refuses to reach the network", "offline" in str(error), str(error))
 
 print("headroom is free capacity in the tightest window")
 check("tightest wins", accsw.headroom([("5h", 38.0, None), ("7d", 71.5, None)]), 28.5)

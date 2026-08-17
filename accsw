@@ -51,6 +51,14 @@ class Fail(Exception):
     pass
 
 
+class RateLimited(Fail):
+    """Carries the server's own Retry-After, so we stop asking before it lifts."""
+
+    def __init__(self, message: str, until: int):
+        super().__init__(message)
+        self.until = until
+
+
 # ---------------------------------------------------------------- primitives
 
 
@@ -455,7 +463,7 @@ CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 HTTP_TIMEOUT = 6
-QUOTA_TTL = 120
+QUOTA_TTL = 300
 
 # The unscoped windows get short names; anything model-scoped is named after its model.
 CLAUDE_WINDOWS = {"session": "5h", "weekly_all": "7d"}
@@ -464,9 +472,16 @@ CLAUDE_WINDOWS = {"session": "5h", "weekly_all": "7d"}
 def http_get_json(url: str, token: str) -> dict:
     """GET with a bearer token, refusing redirects.
 
+    ACCSW_OFFLINE=1 makes this raise instead of reaching the network. The tests set
+    it so that a forgotten stub fails loudly rather than quietly spending the
+    account's rate-limit budget.
+
     urllib copies every header onto a redirected request without comparing hosts, so
     following one would hand a live access token to whatever host answered.
     """
+    if os.environ.get("ACCSW_OFFLINE") == "1":
+        raise Fail(f"offline: refused to call {url.split('/')[2]}")
+
     import urllib.error
     import urllib.request
 
@@ -487,6 +502,11 @@ def http_get_json(url: str, token: str) -> dict:
         with opener.open(request, timeout=HTTP_TIMEOUT) as response:
             return json.loads(response.read())
     except urllib.error.HTTPError as error:
+        if error.code == 429:
+            delay = error.headers.get("retry-after")
+            delay = int(delay) if delay and delay.isdigit() else 900
+            until = int(time.time()) + delay
+            raise RateLimited(f"rate limited until {humanize_reset(until)} from now", until)
         if error.code in (401, 403):
             raise Fail("token expired — switch to this account once to refresh it")
         if 300 <= error.code < 400:
@@ -616,16 +636,13 @@ def codex_quota(token: str) -> list[tuple[str, float, int | None]]:
             )
 
     collect(payload.get("rate_limit") or {}, None)
-    # Per-model caps sit apart, and one of them is routinely the binding limit.
-    for extra in payload.get("additional_rate_limits") or []:
-        collect(extra.get("rate_limit") or {}, extra.get("limit_name"))
     return windows
 
 
 QUOTA = {"claude": claude_quota, "codex": codex_quota}
 
 
-def gather_quota(registry: dict, tools: tuple[str, ...] = TOOLS) -> dict[tuple[str, str], object]:
+def gather_quota(registry: dict, tools: tuple[str, ...] = TOOLS):
     """Query every captured account, one at a time. Values are window lists or Fail.
 
     Sequential on purpose: a burst of simultaneous authenticated requests for several
@@ -638,24 +655,47 @@ def gather_quota(registry: dict, tools: tuple[str, ...] = TOOLS) -> dict[tuple[s
         if tool in entry
     ]
     cache = registry.setdefault("quota_cache", {})
-    fresh = int(time.time()) - QUOTA_TTL
-    snapshot = {}
+    now = int(time.time())
+    snapshot: dict[tuple[str, str], object] = {}
+    ages: dict[tuple[str, str], int] = {}
+
     for position, (name, tool) in enumerate(jobs):
-        cached = cache.get(f"{name}|{tool}")
-        if cached and cached["at"] > fresh:
-            snapshot[(name, tool)] = [tuple(window) for window in cached["windows"]]
+        slot = cache.setdefault(f"{name}|{tool}", {})
+        stored = [tuple(window) for window in slot["windows"]] if "windows" in slot else None
+        if stored is not None and slot["at"] > now - QUOTA_TTL:
+            snapshot[(name, tool)] = stored
+            continue
+        if slot.get("blocked_until", 0) > now and stored is not None:
+            # Rate-limited and we still hold numbers: show those rather than nothing.
+            snapshot[(name, tool)] = stored
+            ages[(name, tool)] = now - slot["at"]
+            continue
+        if slot.get("blocked_until", 0) > now:
+            snapshot[(name, tool)] = Fail(slot["error"])
             continue
         if position:
             time.sleep(0.15)
         try:
             windows = QUOTA[tool](profile_token(tool, name))
-            cache[f"{name}|{tool}"] = {"at": int(time.time()), "windows": windows}
+            slot.update({"at": now, "windows": windows})
+            slot.pop("blocked_until", None)
             snapshot[(name, tool)] = windows
+        except RateLimited as error:
+            slot.update({"error": str(error), "blocked_until": error.until})
+            if stored is not None:
+                snapshot[(name, tool)] = stored
+                ages[(name, tool)] = now - slot["at"]
+            else:
+                snapshot[(name, tool)] = error
         except Fail as error:
-            snapshot[(name, tool)] = error
+            if stored is not None:
+                snapshot[(name, tool)] = stored
+                ages[(name, tool)] = now - slot["at"]
+            else:
+                snapshot[(name, tool)] = error
         except Exception as error:  # a quota probe must never take the switcher down
             snapshot[(name, tool)] = Fail(f"unexpected response ({type(error).__name__})")
-    return snapshot
+    return snapshot, ages
 
 
 def effective_percent(percent: float, resets_at: int | None) -> float:
@@ -733,6 +773,44 @@ def headroom(result) -> float | None:
     """Free capacity in the most-constrained window. None when unknown."""
     tightest = binding_window(result)
     return None if tightest is None else tightest[1]
+
+
+# Which windows decide, and in what order. Claude is asked for Fable first because
+# that is the limit that actually stops work here; Codex reports one window and it
+# is the answer. Windows outside this order are still shown, they just do not vote.
+SELECTION_ORDER = {"claude": ("Fable", "5h", "7d")}
+
+
+def remaining_by_label(result) -> dict[str, float] | None:
+    if isinstance(result, Fail) or not result:
+        return None
+    return {label: 100.0 - effective_percent(percent, at) for label, percent, at in result}
+
+
+def selection_key(result, tool: str, single: bool = True) -> tuple[float, ...] | None:
+    """Remaining capacity in priority order. Compared highest-first, so a tie on
+    Fable falls through to the 5h window, then to the week."""
+    left = remaining_by_label(result)
+    if left is None:
+        return None
+    order = SELECTION_ORDER.get(tool)
+    if not order or not single:
+        # Priority keys only compare within one tool: a three-window Claude key and a
+        # one-window Codex key are not the same measurement. Across tools, fall back
+        # to the scalar that is comparable — the tightest window.
+        return (min(left.values()),)
+    return tuple(left.get(label, 100.0) for label in order)
+
+
+def deciding_window(result, tool: str) -> tuple[str, float] | None:
+    """The first window this tool cares about that the account actually reports."""
+    left = remaining_by_label(result)
+    if left is None:
+        return None
+    for label in SELECTION_ORDER.get(tool) or ():
+        if label in left:
+            return label, left[label]
+    return min(left.items(), key=lambda item: item[1])
 
 
 def binding_window(result) -> tuple[str, float] | None:
@@ -843,22 +921,25 @@ def best_profile(
         relevant = [tool for tool in tools if tool in entry]
         if not relevant:
             continue
-        bindings = [binding_window(quota.get((name, tool))) for tool in relevant]
-        known = [item for item in bindings if item is not None]
+        keys = [selection_key(quota.get((name, tool)), tool, len(tools) == 1) for tool in relevant]
+        known = [key for key in keys if key is not None]
         loaded = any(active.get(tool) == name for tool in tools)
-        tightest = min(known, key=lambda item: item[1]) if known else None
-        margin = tightest[1] if tightest else None
-        labels[name] = tightest[0] if tightest else None
+        margin = min(known) if known else None
+        decided = [deciding_window(quota.get((name, tool)), tool) for tool in relevant]
+        decided = [item for item in decided if item is not None]
+        labels[name] = min(decided, key=lambda item: item[1]) if decided else None
         # Reachable first. An account whose quota cannot be read is also an account
         # whose credential we could not prove works, and switching onto it is how a
         # dead token reaches the slot.
-        ranked.append((0 if margin is None else 1, margin or 0.0, loaded, name))
+        ranked.append((0 if margin is None else 1, margin or (0.0,), loaded, name))
     if not ranked:
         return None, "no account is captured for that tool"
-    ranked.sort(key=lambda row: (-row[0], -row[1], not row[2], row[3]))
+    # negate each element: the key is a tuple now, compared highest-first
+    ranked.sort(key=lambda row: (-row[0], tuple(-value for value in row[1]), not row[2], row[3]))
     measured, margin, _, name = ranked[0]
     if measured:
-        return name, f"{labels[name]} at {margin:.0f}% left"
+        label, value = labels[name]
+        return name, f"{label} at {value:.0f}% left"
     return name, "no account answered; this one's token refreshes on first use"
 
 
@@ -871,7 +952,7 @@ def pick_profile(registry: dict) -> str | None:
     width = max(len(name) for name in names)
 
     print("reading quota…", end="", flush=True)
-    quota = gather_quota(registry)
+    quota, ages = gather_quota(registry)
     print(f"\r{ESC}[2Kswitch account   ↑↓ move   ↵ select   a auto   q cancel")
 
     entries = [profile_lines(name, profiles[name], active, quota, width) for name in names]
@@ -1038,7 +1119,7 @@ def cmd_run(args) -> int:
     if not registry["profiles"]:
         note("no profiles captured yet — run `accsw save`")
     else:
-        quota = gather_quota(registry, (tool,))
+        quota, _ = gather_quota(registry, (tool,))
         name, why = best_profile(registry, quota, (tool,))
         if name is None:
             note(f"{why} — staying on the loaded account")
@@ -1085,7 +1166,7 @@ def cmd_status(args) -> int:
         return 0
     active = registry.get("active", {})
     colour = sys.stdout.isatty()
-    quota = gather_quota(registry)
+    quota, ages = gather_quota(registry)
     for position, name in enumerate(sorted(profiles)):
         if position:
             print()
@@ -1098,8 +1179,11 @@ def cmd_status(args) -> int:
             mark = "●" if active.get(tool) == name else "○"
             email = profiles[name][tool].get("email") or "unknown"
             print(f"  {mark} {tool:<7} {paint(email, '2', colour)}")
+            age = ages.get((name, tool))
             for line in quota_lines(quota.get((name, tool)), colour):
                 print(f"      {line}")
+            if age is not None:
+                print(f"      {paint(f'(rate limited — figures from {humanize_reset(int(time.time()) + age)} ago)', '2', colour)}")
 
     return 0
 
@@ -1111,7 +1195,7 @@ def cmd_auto(args) -> int:
     if not registry["profiles"]:
         raise Fail("no accounts captured yet — log in to one and run accsw")
     tools = selected_tools(args)
-    quota = gather_quota(registry, tools)
+    quota, _ = gather_quota(registry, tools)
     moved = False
     for tool in tools:
         name, why = best_profile(registry, quota, (tool,))

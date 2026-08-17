@@ -46,7 +46,7 @@ def drive(keys: list[bytes], args: list[str]) -> str:
         stdin=secondary,
         stdout=secondary,
         stderr=secondary,
-        env={**os.environ, "ACCSW_HOME": str(store), "TERM": "xterm", "ACCSW_ABSORB": "0"},
+        env={**os.environ, "ACCSW_HOME": str(store), "TERM": "xterm", "ACCSW_ABSORB": "0", "ACCSW_OFFLINE": "1"},
         close_fds=True,
     )
     os.close(secondary)
@@ -120,7 +120,7 @@ def main() -> int:
         capture_output=True,
         text=True,
         timeout=15,
-        env={**os.environ, "ACCSW_HOME": tempfile.mkdtemp(prefix="accsw-test-"), "ACCSW_ABSORB": "0"},
+        env={**os.environ, "ACCSW_HOME": tempfile.mkdtemp(prefix="accsw-test-"), "ACCSW_ABSORB": "0", "ACCSW_OFFLINE": "1"},
         stdin=subprocess.DEVNULL,
     )
     results.append(
