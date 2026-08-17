@@ -1268,6 +1268,17 @@ def apply_switch(profile: str, tools: tuple[str, ...], registry: dict) -> list[s
 
 
 
+def shared_email(entry: dict) -> str | None:
+    """The one address behind a profile, or None when its tools disagree.
+
+    A profile is named after the address it holds, so both tools normally carry the
+    same one and printing it twice is noise. They can still differ if a registry was
+    hand-edited, and then each is shown on its own line.
+    """
+    seen = {entry[tool].get("email") for tool in TOOLS if tool in entry}
+    return seen.pop() if len(seen) == 1 else None
+
+
 def cmd_list(args) -> int:
     registry = load_state()
     profiles = registry["profiles"]
@@ -1285,21 +1296,24 @@ def cmd_list(args) -> int:
     ]
     cell = max(emails, default=8)
     for name in sorted(profiles):
-        # A fixed cell per tool, printed empty when a profile has no account for it,
-        # so every column starts in the same place whatever the address lengths are.
+        one = shared_email(profiles[name])
         columns = []
         for tool in TOOLS:
             if tool not in profiles[name]:
-                columns.append(" " * (cell + len(tool) + 3))
+                columns.append(" " * (len(tool) + 2))
                 continue
             mark = paint("●", LOADED, colour) if active.get(tool) == name else paint("○", DIM, colour)
-            email = profiles[name][tool].get("email") or "unknown"
-            flag = paint(" !", "31", colour) if profiles[name][tool].get("needs_signin") else ""
-            columns.append(
-                f"{mark} {paint(tool, TOOL_COLOUR[tool], colour)} "
-                f"{paint(f'{email:<{cell}}', DIM, colour)}{flag}"
-            )
-        print(f"{name:<{width}}   " + "  ".join(columns).rstrip())
+            flag = paint("!", "31", colour) if profiles[name][tool].get("needs_signin") else ""
+            columns.append(f"{mark} {paint(tool, TOOL_COLOUR[tool], colour)}{flag}")
+        address = one or "—"
+        print(f"{name:<{width}}   {paint(f'{address:<{cell}}', DIM, colour)}  " + " ".join(columns))
+        if one is None:
+            for tool in TOOLS:
+                if tool in profiles[name]:
+                    print(
+                        f"{'':<{width}}   {paint(tool, TOOL_COLOUR[tool], colour)} "
+                        f"{paint(profiles[name][tool].get('email') or 'unknown', DIM, colour)}"
+                    )
     return 0
 
 
@@ -1339,8 +1353,10 @@ def cmd_status(args) -> int:
         title = paint(name, BOLD, colour) if loaded else name
         tag = paint("  in use", LOADED, colour) if loaded else ""
         mean = availability(name, profiles[name], quota)
-        share = paint(f"   {mean:.0f}% free on average", DIM, colour) if mean is not None else ""
-        print(f"{title}{tag}{share}")
+        share = paint(f"   {mean:.0f}% free", DIM, colour) if mean is not None else ""
+        one = shared_email(profiles[name])
+        address = paint(f"   {one}", DIM, colour) if one else ""
+        print(f"{title}{address}{tag}{share}")
         for tool in TOOLS:
             if tool not in profiles[name]:
                 continue
@@ -1352,10 +1368,9 @@ def cmd_status(args) -> int:
                 if profiles[name][tool].get("needs_signin")
                 else ""
             )
-            print(
-                f"  {mark} {paint(f'{tool:<7}', TOOL_COLOUR[tool], colour)} "
-                f"{paint(email, DIM, colour)}{flag}"
-            )
+            label = f"{tool:<7}" if not one else tool
+            shown = "" if one else f" {paint(email, DIM, colour)}"
+            print(f"  {mark} {paint(label, TOOL_COLOUR[tool], colour)}{shown}{flag}")
             age = ages.get((name, tool))
             for line in quota_lines(quota.get((name, tool)), colour, width):
                 print(f"      {line}")
