@@ -1123,31 +1123,51 @@ def quit_app(name: str) -> None:
     raise Fail(f"{name} did not quit; it was left on its current account")
 
 
-def launch_claude_app(profile: str) -> None:
-    """Open Claude.app on this profile's own data and config directories.
+CLAUDE_APP_SUPPORT = HOME / "Library" / "Application Support" / "Claude"
 
-    CLAUDE_CONFIG_DIR also decides the keychain service the app's built-in Claude
-    Code reads, so the credential is placed there too — otherwise the window shows
-    one account while its coding half uses another.
+
+def point_claude_app_at(profile: str) -> bool:
+    """Make the app's own support directory a link to this profile's.
+
+    Environment variables only reach the app when accsw launches it; opening it
+    from the Dock would land on the default profile instead. Linking the path the
+    app always reads puts it on the right account however it is started.
+
+    Returns True when the link had to move, so the caller knows a restart is due.
+    """
+    target = CLAUDE_APP_DATA / profile
+    target.mkdir(parents=True, exist_ok=True)
+    target.chmod(0o700)
+
+    if CLAUDE_APP_SUPPORT.is_symlink():
+        if CLAUDE_APP_SUPPORT.readlink() == target:
+            return False
+        quit_app("Claude")
+        CLAUDE_APP_SUPPORT.unlink()
+    elif CLAUDE_APP_SUPPORT.exists():
+        # A real directory from before accsw: kept whole, once, under its own name.
+        quit_app("Claude")
+        kept = CLAUDE_APP_DATA / "_before-accsw"
+        if kept.exists():
+            raise Fail(f"{kept} already exists — move it aside by hand and rerun")
+        CLAUDE_APP_DATA.mkdir(parents=True, exist_ok=True)
+        CLAUDE_APP_SUPPORT.rename(kept)
+        note(f"kept the previous Claude profile as {kept}")
+    CLAUDE_APP_SUPPORT.symlink_to(target)
+    return True
+
+
+def launch_claude_app(profile: str) -> None:
+    """Put the app on this profile, then start it.
+
+    Its built-in Claude Code reads the canonical keychain item, which the switch
+    already installed, so both halves of the window agree without extra plumbing.
     """
     if not CLAUDE_BINARY.exists():
         return
-    data = CLAUDE_APP_DATA / profile
-    config = CLAUDE_APP_CONFIG / profile
-    for directory in (data, config):
-        directory.mkdir(parents=True, exist_ok=True)
-        directory.chmod(0o700)
-    blob = keychain_read(profile_service(profile))
-    if blob:
-        keychain_write(claude_namespaced_service(config), blob, f"accsw claude app — {profile}")
-    quit_app("Claude")
+    point_claude_app_at(profile)
     subprocess.Popen(
         [str(CLAUDE_BINARY)],
-        env={
-            **os.environ,
-            "CLAUDE_USER_DATA_DIR": str(data),
-            "CLAUDE_CONFIG_DIR": str(config),
-        },
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -1321,10 +1341,15 @@ def cmd_auto(args) -> int:
             note(f"{tool}: {why}")
             continue
         if actually_loaded(tool, registry) == name:
-            # Nothing changed, so nothing is touched. Bouncing a window to land on the
+            # Nothing changed, so nothing is bounced. Bouncing a window to land on the
             # account it is already on is pure interruption — and when every account is
-            # spent, that is every single run.
+            # spent, that is every single run. The link is still checked, because it
+            # costs nothing and decides where a Dock launch lands.
             print(f"{tool}: staying on {name} — {why}")
+            if tool == "claude" and CLAUDE_BINARY.exists() and point_claude_app_at(name):
+                note(f"pointed Claude at {name}")
+                if app_running("Claude"):
+                    launch_claude_app(name)
             continue
         for line in apply_switch(name, (tool,), registry):
             print(f"{tool}: {line}")
