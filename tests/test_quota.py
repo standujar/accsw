@@ -87,10 +87,14 @@ windows = accsw.codex_quota("token")
 check("labels from window duration", [label for label, _, _ in windows], ["5h", "7d"])
 check("used percent read", [percent for _, percent, _ in windows], [12.0, 9.0])
 
-print("missing rate limits degrade to an empty window list")
-accsw.http_get_json = lambda url, token: {}
-check("no windows", accsw.codex_quota("token"), [])
-check("formatted as a notice", accsw.format_quota([]), "— no window reported")
+print("codex says plainly that it has no free quota endpoint")
+accsw.http_get_json = lambda url, token: {"profile": {}, "stats": {}, "metadata": {}}
+try:
+    accsw.codex_quota("token")
+    check_that("raises rather than showing an empty gauge", False, "no exception")
+except accsw.Fail as error:
+    check_that("raises rather than showing an empty gauge", "no quota endpoint" in str(error), str(error))
+check("an empty window list still formats", accsw.format_quota([]), "— no window reported")
 
 print("headroom is free capacity in the tightest window")
 check("tightest wins", accsw.headroom([("5h", 38.0, None), ("7d", 71.5, None)]), 28.5)

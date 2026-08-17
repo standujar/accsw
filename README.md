@@ -50,8 +50,10 @@ different accounts from one address is the shape anti-abuse systems act on.
 
 - **Claude** — `GET api.anthropic.com/api/oauth/usage`, which reports a `five_hour` and a `seven_day`
   window, each with a utilization percentage and a reset timestamp.
-- **Codex** — `GET chatgpt.com/backend-api/wham/profiles/me`, whose `rateLimits.primary` and
-  `.secondary` carry `usedPercent`, `windowDurationMins` and `resetsAt`.
+- **Codex** — no free source exists. `wham/profiles/me` returns lifetime stats, not limits, and the
+  real numbers (`RateLimitWindow { used_percent, window_minutes, resets_at }`) reach the client as a
+  streamed event *during a turn*. Reading them would mean paying for a completion, so accsw says so
+  instead of doing it behind your back. Auto-selection simply has no Codex signal to act on.
 
 Auto-selection has one rule, and it fits in a sentence: **pick the account whose most-constrained
 window is least used.** A tie keeps whatever is already loaded, so it never switches for nothing.
@@ -143,7 +145,11 @@ macOS, Python 3. No third-party packages.
 ```
 python3 tests/test_quota.py     # 66 checks — parsing, rollover, hex, naming, selection, display
 python3 tests/test_picker.py    # 11 checks — the picker driven through a real pty
+python3 tests/test_keychain.py  # 9 checks  — an 8 KB blob round-tripped through the real keychain
 ```
 
-Neither touches a real credential: the quota tests replace the HTTP layer with canned payloads shaped
-like the real responses, and the picker tests run against a throwaway store.
+None touches a real credential: the quota tests replace the HTTP layer with canned payloads shaped
+like the real responses, the picker tests run against a throwaway store, and the keychain test writes
+a fake blob of realistic size to a throwaway service. That last one exists because size is what broke
+an earlier write mechanism — it passed every small-string test, then printed an 8 KB credential to the
+terminal the first time it met a real one.

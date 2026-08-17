@@ -92,6 +92,17 @@ def looks_hex(text: str) -> bool:
     )
 
 
+def diagnose(result: subprocess.CompletedProcess, secret: str | None = None) -> str:
+    """`security` echoes its arguments on failure, so its stderr can contain the secret.
+
+    Never interpolate it raw. Anything carrying the payload — or its hex — is dropped.
+    """
+    text = " ".join(result.stderr.split())
+    if secret and (secret in text or secret.encode("utf-8").hex() in text):
+        return "(diagnostic withheld: it contained the credential)"
+    return text[:200] or f"exit {result.returncode}"
+
+
 def keychain_read(service: str) -> str | None:
     """None means the item is genuinely absent; anything else that went wrong raises."""
     result = run(
@@ -100,10 +111,7 @@ def keychain_read(service: str) -> str | None:
     if result.returncode == ITEM_NOT_FOUND:
         return None
     if result.returncode != 0:
-        raise Fail(
-            f"keychain read failed for {service} (exit {result.returncode}): "
-            f"{result.stderr.strip()}"
-        )
+        raise Fail(f"keychain read failed for {service}: {diagnose(result)}")
     secret = result.stdout.strip()
     if not secret:
         return None
@@ -117,16 +125,32 @@ def keychain_read(service: str) -> str | None:
 
 
 def keychain_write(service: str, secret: str, label: str) -> None:
-    """Written as hex through stdin, so the secret never appears in any argument list."""
-    command = (
-        f'add-generic-password -U -a "{CLAUDE_KEYCHAIN_ACCOUNT}" -s "{service}" '
-        f'-l "{label}" -X {secret.encode("utf-8").hex()}\n'
+    """Written as hex via -X.
+
+    Batch mode (`security -i`) looks safer — the secret would stay off the argument
+    list — but it wraps long lines and then reports each fragment as an unknown
+    command, printing the credential to the terminal. Real blobs are ~8 KB, so that
+    fires every time. Argument passing is the mechanism that actually works; the
+    residual exposure is a few milliseconds in this user's own process list.
+    """
+    result = run(
+        [
+            "security",
+            "add-generic-password",
+            "-U",
+            "-a",
+            CLAUDE_KEYCHAIN_ACCOUNT,
+            "-s",
+            service,
+            "-l",
+            label,
+            "-X",
+            secret.encode("utf-8").hex(),
+        ]
     )
-    result = run(["security", "-i"], stdin=command)
     if result.returncode != 0:
-        raise Fail(f"keychain write failed for {service}: {result.stderr.strip()}")
-    written = keychain_read(service)
-    if written != secret:
+        raise Fail(f"keychain write failed for {service}: {diagnose(result, secret)}")
+    if keychain_read(service) != secret:
         raise Fail(f"keychain write for {service} did not round-trip; nothing was switched")
 
 
@@ -146,10 +170,7 @@ def keychain_delete(service: str) -> None:
         if result.returncode == ITEM_NOT_FOUND:
             return
         if result.returncode != 0:
-            raise Fail(
-                f"keychain delete failed for {service} (exit {result.returncode}): "
-                f"{result.stderr.strip()}"
-            )
+            raise Fail(f"keychain delete failed for {service}: {diagnose(result)}")
 
 
 def profile_service(profile: str) -> str:
@@ -238,6 +259,23 @@ def slugify(text: str) -> str:
     return "-".join(part for part in cleaned.split("-") if part)
 
 
+def name_for(email: str, tool: str, registry: dict) -> str:
+    """The profile an account belongs in: its own, or a free name derived from its address."""
+    local, _, domain = email.partition("@")
+    candidates = [slugify(local)]
+    if domain:
+        candidates.append(f"{slugify(local)}-{slugify(domain.split('.')[0])}")
+    for name in candidates:
+        owner = registry["profiles"].get(name, {}).get(tool, {}).get("email")
+        if owner is None or owner == email:
+            return name
+    base = candidates[-1]
+    suffix = 2
+    while f"{base}-{suffix}" in registry["profiles"]:
+        suffix += 1
+    return f"{base}-{suffix}"
+
+
 def derive_profile(registry: dict) -> tuple[str, str]:
     """Name a profile after whichever account is logged in, so nothing has to be invented.
 
@@ -246,25 +284,56 @@ def derive_profile(registry: dict) -> tuple[str, str]:
     """
     for tool in TOOLS:
         email = LIVE_IDENTITY[tool]()
-        if not email:
-            continue
-        local, _, domain = email.partition("@")
-        candidates = [slugify(local)]
-        if domain:
-            candidates.append(f"{slugify(local)}-{slugify(domain.split('.')[0])}")
-        for name in candidates:
-            owner = registry["profiles"].get(name, {}).get(tool, {}).get("email")
-            if owner is None or owner == email:
-                return name, email
-        base = candidates[-1]
-        suffix = 2
-        while f"{base}-{suffix}" in registry["profiles"]:
-            suffix += 1
-        return f"{base}-{suffix}", email
+        if email:
+            return name_for(email, tool, registry), email
     raise Fail(
         "nothing is logged in — run `claude` or `codex login` first, "
         "or name a profile explicitly"
     )
+
+
+def live_blob(tool: str) -> str | None:
+    if tool == "claude":
+        return keychain_read(CLAUDE_KEYCHAIN_SERVICE)
+    return read_file(CODEX_AUTH)
+
+
+def parked_blob(tool: str, profile: str) -> str | None:
+    if tool == "claude":
+        return keychain_read(profile_service(profile))
+    return read_file(CODEX_VAULT / f"{profile}.json")
+
+
+def absorb_live(registry: dict) -> list[str]:
+    """Park whatever is signed in right now, under a name derived from the account.
+
+    This runs before every command that touches the slot, which is why `save` is
+    optional: a login made outside accsw is picked up on its own, and a parked copy
+    can never go stale behind a live session that keeps refreshing its token.
+    Writes only when the parked bytes actually differ, so the common case is two
+    cheap reads and nothing else.
+    """
+    if os.environ.get("ACCSW_ABSORB") == "0":
+        return []
+    absorbed = []
+    for tool in TOOLS:
+        email = LIVE_IDENTITY[tool]()
+        if email is None:
+            continue
+        live = live_blob(tool)
+        if live is None:
+            continue
+        name = name_for(email, tool, registry)
+        recorded = registry["profiles"].get(name, {}).get(tool)
+        # The shortcut needs BOTH halves: matching bytes in the locker and an entry
+        # describing them. With only the first, `active` would name a profile that
+        # `list` cannot show and `use` cannot restore.
+        if recorded and parked_blob(tool, name) == live:
+            registry.setdefault("active", {})[tool] = name
+            continue
+        CAPTURE[tool](name, registry, replace=True)
+        absorbed.append(f"{tool}: {email} → {name}")
+    return absorbed
 
 
 def guard_rebind(profile: str, tool: str, registry: dict, email: str | None, replace: bool) -> None:
@@ -367,26 +436,12 @@ PREFLIGHT = {"claude": preflight_claude, "codex": preflight_codex}
 LIVE_IDENTITY = {"claude": claude_identity, "codex": codex_identity}
 
 
-def stash_live(tool: str, registry: dict) -> str | None:
-    """Park the credential that is loaded right now back into the profile it came from.
-
-    Without this, `use` is a one-way restore: a profile's stored blob goes stale as
-    its live session refreshes, and switching back writes a dead refresh token.
-    """
-    active = registry.get("active", {}).get(tool)
-    if active is None:
-        return None
-    live = LIVE_IDENTITY[tool]()
-    if live is None:
-        return None
-    known = registry["profiles"].get(active, {}).get(tool, {}).get("email")
-    if known and live != known:
-        raise Fail(
-            f"{tool} is logged in as {live}, but accsw believes {active!r} ({known}) is loaded. "
-            f"Capture it first with `accsw save <name> --tool {tool}` so nothing is lost."
-        )
-    CAPTURE[tool](active, registry)
-    return active
+def load_state() -> dict:
+    """The registry, with whatever is signed in already parked into it."""
+    registry = load_registry()
+    if absorb_live(registry):
+        save_registry(registry)
+    return registry
 
 
 # -------------------------------------------------------------------- quota
@@ -503,8 +558,18 @@ def claude_quota(token: str) -> list[tuple[str, float, int | None]]:
 
 
 def codex_quota(token: str) -> list[tuple[str, float, int | None]]:
+    """Codex has no free quota endpoint.
+
+    `wham/profiles/me` returns lifetime stats — tokens, streaks — and no limits.
+    The real numbers (`RateLimitWindow { used_percent, window_minutes, resets_at }`)
+    reach the client as a streamed event during an actual turn, so reading them
+    would mean paying for a completion. We do not do that behind your back; Codex
+    simply has no quota to show until OpenAI exposes one.
+    """
     payload = http_get_json(CODEX_PROFILE_URL, token)
     limits = payload.get("rateLimits") or {}
+    if not limits:
+        raise Fail("no quota endpoint — Codex only reports limits during a live turn")
     windows = []
     for key, label in (("primary", "5h"), ("secondary", "7d")):
         window = limits.get(key)
@@ -789,8 +854,6 @@ def apply_switch(profile: str, tools: tuple[str, ...], registry: dict) -> list[s
         if registry.get("active", {}).get(tool) == profile:
             outcome.append(f"{tool}: already loaded")
             continue
-        if stash_live(tool, registry):
-            save_registry(registry)
         email = RESTORE[tool](profile, registry)
         save_registry(registry)
         outcome.append(f"{tool}: {email}")
@@ -798,7 +861,7 @@ def apply_switch(profile: str, tools: tuple[str, ...], registry: dict) -> list[s
 
 
 def cmd_save(args) -> int:
-    registry = load_registry()
+    registry = load_state()
     if args.profile is None:
         args.profile, discovered = derive_profile(registry)
         print(f"found {discovered} logged in — capturing as {args.profile!r}")
@@ -823,7 +886,7 @@ def cmd_save(args) -> int:
 
 
 def cmd_use(args) -> int:
-    registry = load_registry()
+    registry = load_state()
     if args.profile is None:
         args.profile = pick_profile(registry)
         if args.profile is None:
@@ -846,7 +909,7 @@ def cmd_use(args) -> int:
 def cmd_run(args) -> int:
     """Pick the roomiest account, switch to it, then become the tool."""
     tool = args.tool_name
-    registry = load_registry()
+    registry = load_state()
     binary = shutil.which(tool)
     if binary is None:
         raise Fail(f"{tool} is not on PATH")
@@ -874,7 +937,7 @@ def note(message: str) -> None:
 
 
 def cmd_list(args) -> int:
-    registry = load_registry()
+    registry = load_state()
     profiles = registry["profiles"]
     if not profiles:
         print("no profiles yet — capture the current login with `accsw save <name>`")
@@ -894,7 +957,7 @@ def cmd_list(args) -> int:
 
 
 def cmd_status(args) -> int:
-    registry = load_registry()
+    registry = load_state()
     active = registry.get("active", {})
     colour = sys.stdout.isatty()
     for position, tool in enumerate(TOOLS):
@@ -923,7 +986,7 @@ def cmd_status(args) -> int:
 
 
 def cmd_auto(args) -> int:
-    registry = load_registry()
+    registry = load_state()
     if not registry["profiles"]:
         raise Fail("no profiles yet — capture the current login with `accsw save <name>`")
     tools = selected_tools(args)
