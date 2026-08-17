@@ -10,14 +10,14 @@ Run it with no arguments and pick from the menu:
 ```
 $ accsw
 switch account   ↑↓ move   ↵ select   a auto   q cancel
- ❯  eliza  ● claude  developer@elizalabs.ai   5h ████░░░░░░  38% resets 2h 10m   7d ███████░░░  71% resets 3d
-           ● codex   dev@eliza.ai             5h ██░░░░░░░░  12% resets 45m      7d █░░░░░░░░░   9% resets 5d
-    perso  ○ claude  stan@perso.com           5h ░░░░░░░░░░   0% resets 4h       7d ██░░░░░░░░  18% resets 6d
-           ○ codex   stan@perso.com           — token expired — switch to this account once to refresh it
+ ❯  eliza  ● claude  developer@elizalabs.ai     5h ████░░   62% 2h    7d ███░░░   29% 3d
+           ● codex   dev@eliza.ai               5h █░░░░░   12% 45m   7d ░░░░░░    9% 5d
+    perso  ○ claude  stan@perso.com             5h ██████  100% 4h    7d █████░   82% 6d
+           ○ codex   stan@perso.com             — token expired — switch to this account once to refresh it
 ```
 
-`●` is the account currently loaded, `○` a captured one waiting. Arrows or `j`/`k` move, `↵` switches,
-`a` picks the roomiest account automatically, `q` backs out. Everything is also addressable directly:
+Percentages are what is **left**. `●` is the account currently loaded, `○` a captured one waiting.
+Arrows or `j`/`k` move, `↵` switches, `a` picks the roomiest account automatically, `q` backs out.
 
 Or never think about it at all — launch through `run` and it lands on the roomiest account:
 
@@ -43,8 +43,10 @@ accsw rm perso            # forget a profile (never logs anything out)
 
 ## Quota
 
-Numbers are read live, per account, in parallel, every time you open the picker. Each account's own
-stored token is used to query its own usage, so you see every account's state without switching to it.
+Numbers are read live, one account at a time, every time you open the picker. Each account's own
+stored token queries its own usage, so you see every account's state without switching to it. The
+reads are sequential on purpose — a burst of simultaneous authenticated requests for several
+different accounts from one address is the shape anti-abuse systems act on.
 
 - **Claude** — `GET api.anthropic.com/api/oauth/usage`, which reports a `five_hour` and a `seven_day`
   window, each with a utilization percentage and a reset timestamp.
