@@ -48,8 +48,8 @@ check("garbage string is None", accsw.parse_epoch("soon"), None)
 check("None is None", accsw.parse_epoch(None), None)
 
 print("humanize_reset reads like a human wrote it")
-now = int(time.time())
-check("past resets say now", accsw.humanize_reset(now - 10), "now")
+now = int(time.time()) + 30  # off any minute boundary, so the clock cannot tick into the assertion
+check("past resets say now", accsw.humanize_reset(int(time.time()) - 10), "now")
 check("minutes only", accsw.humanize_reset(now + 25 * 60), "25m")
 check("hours and minutes", accsw.humanize_reset(now + 2 * HOUR + 10 * 60), "2h 10m")
 check("whole hours drop minutes", accsw.humanize_reset(now + 3 * HOUR), "3h")
@@ -200,6 +200,27 @@ check("an empty slot loads nothing, whatever the record says",
       accsw.actually_loaded("codex", reg_live), None)
 accsw.CODEX_AUTH.write_text('{"tokens": {"id_token": "b"}}')
 check("the slot names its real owner", accsw.actually_loaded("codex", reg_live), "two")
+
+print("a newer parked sign-in is never overwritten by an older live one")
+fresh = '{"claudeAiOauth": {"expiresAt": %d}}' % ((time.time() + 7200) * 1000)
+stale = '{"claudeAiOauth": {"expiresAt": %d}}' % ((time.time() + 60) * 1000)
+check("claude: the later one wins", accsw.fresher("claude", fresh, stale), True)
+check("claude: and not the other way round", accsw.fresher("claude", stale, fresh), False)
+check("an unreadable expiry never wins",
+      accsw.fresher("claude", '{"claudeAiOauth": {}}', stale), False)
+check("a null oauth object does not explode",
+      accsw.claude_token_expiry('{"claudeAiOauth": null}'), None)
+
+print("atomic_write leaves the target intact and never widens it")
+import tempfile as _t, os as _os, pathlib as _p
+scratch = _p.Path(_t.mkdtemp())
+target = scratch / "cred.json"
+accsw.atomic_write(target, '{"a": 1}')
+check("written", target.read_text(), '{"a": 1}')
+check("mode 600 from creation", oct(target.stat().st_mode)[-3:], "600")
+accsw.atomic_write(target, '{"a": 2}')
+check("replaced in place", target.read_text(), '{"a": 2}')
+check("no staged file left behind", [f.name for f in scratch.iterdir()], ["cred.json"])
 
 print("codex sign-ins are renewed rather than left to expire")
 check("a credential with no refresh token cannot be renewed",

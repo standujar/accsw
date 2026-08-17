@@ -26,6 +26,7 @@ import os
 import pwd
 import shutil
 import datetime
+import http.client
 import subprocess
 import sys
 import tempfile
@@ -302,10 +303,15 @@ def credential_owner(tool: str, blob: str) -> str | None:
     return claude_oauth_identity(claude_access_token(blob))["emailAddress"]
 
 
-def fresher(candidate: str, other: str) -> bool:
+def token_expiry(tool: str, blob: str) -> float | None:
+    """Seconds left on the sign-in this blob carries, whichever tool it belongs to."""
+    return claude_token_expiry(blob) if tool == "claude" else codex_token_expiry(blob)
+
+
+def fresher(tool: str, candidate: str, other: str) -> bool:
     """Is `candidate` a later sign-in than `other`? Unknown expiry never wins."""
-    left = codex_token_expiry(candidate)
-    right = codex_token_expiry(other)
+    left = token_expiry(tool, candidate)
+    right = token_expiry(tool, other)
     return left is not None and right is not None and left > right
 
 
@@ -356,7 +362,7 @@ def absorb_live(registry: dict) -> list[str]:
         if known and parked == live:
             registry.setdefault("active", {})[tool] = name
             continue
-        if tool == "codex" and parked is not None and fresher(parked, live):
+        if parked is not None and fresher(tool, parked, live):
             # The locker holds a newer sign-in than the slot — a freshly added account
             # whose credential has not been installed yet. Absorbing here would
             # overwrite it with the older one and undo the sign-in.
@@ -477,6 +483,10 @@ def token_grant(request) -> dict:
         raise Unreachable(f"token endpoint unreachable ({error.reason})")
     except json.JSONDecodeError:
         raise Unreachable("token endpoint returned something that is not JSON")
+    except (TimeoutError, OSError, http.client.HTTPException) as error:
+        # The POST landed, so the server has already rotated. Losing the reply is
+        # not a refusal, and must never be recorded as one.
+        raise Unreachable(f"token reply lost ({type(error).__name__}) — rotation may be spent")
     return granted if isinstance(granted, dict) else {}
 
 
@@ -486,7 +496,7 @@ CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
 def claude_token_expiry(blob: str) -> float | None:
     """Seconds left on the access token, from the expiresAt the blob carries in ms."""
-    expiry = json.loads(blob).get("claudeAiOauth", {}).get("expiresAt")
+    expiry = (json.loads(blob).get("claudeAiOauth") or {}).get("expiresAt")
     return None if not expiry else expiry / 1000 - time.time()
 
 
@@ -625,6 +635,25 @@ RESTORE = {"claude": restore_claude, "codex": restore_codex}
 PREFLIGHT = {"claude": preflight_claude, "codex": preflight_codex}
 
 
+def hold_lock() -> object:
+    """One command at a time.
+
+    Every command reads the registry, changes a credential slot and writes back.
+    Two runs interleaved lose one of the two, and can leave the slot holding one
+    account while the registry names another.
+    """
+    import fcntl
+
+    STORE.mkdir(parents=True, exist_ok=True)
+    handle = open(STORE / ".lock", "w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        raise Fail("another accsw is running — wait for it to finish")
+    return handle
+
+
 def load_state() -> dict:
     """The registry, with whatever is signed in already parked into it."""
     registry = load_registry()
@@ -711,7 +740,7 @@ def parse_epoch(value) -> int | None:
 def claude_access_token(blob: str | None) -> str:
     if blob is None:
         raise Fail("no stored credential")
-    token = json.loads(blob).get("claudeAiOauth", {}).get("accessToken")
+    token = (json.loads(blob).get("claudeAiOauth") or {}).get("accessToken")
     if not token:
         raise Fail("credential has no access token")
     return token
@@ -1257,9 +1286,14 @@ def cmd_status(args) -> int:
             here = active.get(tool) == name
             mark = paint("●", LOADED, colour) if here else paint("○", DIM, colour)
             email = profiles[name][tool].get("email") or "unknown"
+            flag = (
+                paint("  sign-in needed", "31", colour)
+                if profiles[name][tool].get("needs_signin")
+                else ""
+            )
             print(
                 f"  {mark} {paint(f'{tool:<7}', TOOL_COLOUR[tool], colour)} "
-                f"{paint(email, DIM, colour)}"
+                f"{paint(email, DIM, colour)}{flag}"
             )
             age = ages.get((name, tool))
             for line in quota_lines(quota.get((name, tool)), colour):
@@ -1415,7 +1449,8 @@ def main() -> int:
 
     args = parser.parse_args()
     try:
-        return args.handler(args)
+        with hold_lock():
+            return args.handler(args)
     except Fail as error:
         print(f"accsw: {error}", file=sys.stderr)
         return 1
