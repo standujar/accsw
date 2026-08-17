@@ -28,9 +28,26 @@ accsw status       every account: what is left, when it comes back
 accsw list         which accounts are captured
 accsw add claude   sign in to another account, without logging out of this one
 accsw add codex
+accsw --renew      refresh every sign-in without switching anything
 ```
 
-There is no fifth command on purpose.
+`--renew` is what repairs a stale account, and what the background agent runs. It never switches, never
+opens an app, and never asks you to log in — it trades each idle refresh token for a fresh one.
+
+## Why it does not lapse
+
+A sign-in has one valid refresh token at a time, so whoever refreshes last holds it. A copy left to
+age loses that race to any process still running on the old credential, and a lost race cannot be
+recovered — that is the re-login this tool exists to avoid.
+
+So an hourly agent is installed on first use, and every run also renews the accounts you are *not*
+on. The one you are on is deliberately left alone: the tool using it refreshes it itself, and taking
+the token out from under a live session is the same bug seen from the other side.
+
+```
+launchctl unload ~/Library/LaunchAgents/com.standujar.accsw.plist   # to remove it
+rm ~/Library/LaunchAgents/com.standujar.accsw.plist
+```
 
 ## Adding your accounts
 

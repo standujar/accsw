@@ -677,13 +677,17 @@ def renew_parked(registry: dict) -> list[str]:
     for name, entry in registry["profiles"].items():
         for tool in TOOLS:
             stored = entry.get(tool)
-            if stored is None or stored.get("needs_signin") or active.get(tool) == name:
+            if stored is None or active.get(tool) == name:
                 continue
             blob = parked_blob(tool, name)
             if blob is None:
                 continue
             left = token_expiry(tool, blob)
-            if left is None or left > RENEW_MARGIN:
+            flagged = bool(stored.get("needs_signin"))
+            # A flagged account is retried, not skipped: the flag may have been set
+            # by a bad minute of wifi, and a grant that is merely stale comes back.
+            # One failed call an hour is a cheap price for self-healing.
+            if not flagged and (left is None or left > RENEW_MARGIN):
                 continue
             try:
                 fresh = REFRESH[tool](blob)
@@ -691,10 +695,13 @@ def renew_parked(registry: dict) -> list[str]:
                 continue
             if fresh is None:
                 stored["needs_signin"] = True
-                renewed.append(f"{name}/{tool}: refused, sign in again")
+                # Reported every time, flagged or not: "nothing to do" and "I tried
+                # and it is still dead" are different answers to the same command.
+                renewed.append(f"{name}/{tool}: refused, `accsw add {tool}` to sign in")
                 continue
             park_blob(tool, name, fresh)
-            renewed.append(f"{name}/{tool}")
+            stored.pop("needs_signin", None)
+            renewed.append(f"{name}/{tool}" + (" (recovered)" if flagged else ""))
     return renewed
 
 
@@ -1344,12 +1351,76 @@ def cmd_status(args) -> int:
     return 0
 
 
+AGENT_LABEL = "com.standujar.accsw"
+AGENT_PLIST = HOME / "Library" / "LaunchAgents" / f"{AGENT_LABEL}.plist"
+RENEW_EVERY = 3600
+
+
+def ensure_agent() -> bool:
+    """Install the hourly renewal agent once, on first use.
+
+    Without it, keeping sign-ins alive depends on you happening to run accsw often
+    enough — and the one time you do not is the one time an account dies. Removal
+    is one line, printed when it is installed and written in the README.
+    """
+    if AGENT_PLIST.exists():
+        return False
+    binary = Path(sys.argv[0]).resolve()
+    AGENT_PLIST.parent.mkdir(parents=True, exist_ok=True)
+    AGENT_PLIST.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0"><dict>\n'
+        f"  <key>Label</key><string>{AGENT_LABEL}</string>\n"
+        "  <key>ProgramArguments</key>\n"
+        f"  <array><string>{sys.executable}</string><string>{binary}</string>"
+        "<string>--renew</string></array>\n"
+        f"  <key>StartInterval</key><integer>{RENEW_EVERY}</integer>\n"
+        "  <key>RunAtLoad</key><true/>\n"
+        f"  <key>StandardOutPath</key><string>{STORE / 'renew.log'}</string>\n"
+        f"  <key>StandardErrorPath</key><string>{STORE / 'renew.log'}</string>\n"
+        "</dict></plist>\n",
+        encoding="utf-8",
+    )
+    run(["launchctl", "unload", str(AGENT_PLIST)])
+    result = run(["launchctl", "load", str(AGENT_PLIST)])
+    if result.returncode != 0:
+        AGENT_PLIST.unlink(missing_ok=True)
+        note(f"could not install the hourly renewal agent: {diagnose(result)}")
+        return False
+    return True
+
+
+def cmd_renew(args) -> int:
+    """Keep every account alive and change nothing else.
+
+    What the background agent runs. It must never switch or reopen anything: a job
+    that moves you off your account while you are working is worse than an expired
+    credential, which is merely a renewal away.
+    """
+    registry = load_state()
+    kept = renew_parked(registry)
+    save_registry(registry)
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    if not kept:
+        print(f"{stamp}  every sign-in has time left; nothing to renew")
+        return 0
+    print(f"{stamp}  {len(kept)} touched")
+    for line in kept:
+        print(f"  {line}")
+    return 0
+
+
 def cmd_auto(args) -> int:
     """Choose per tool. The two credential slots are independent, and an account that
     only exists for one of them must never decide the other."""
     registry = load_state()
     if not registry["profiles"]:
         raise Fail("no accounts captured yet — log in to one and run accsw")
+    if ensure_agent():
+        note(f"installed an hourly renewal agent so sign-ins cannot lapse "
+             f"(remove: launchctl unload {AGENT_PLIST} && rm {AGENT_PLIST})")
     kept = renew_parked(registry)
     if kept:
         save_registry(registry)
@@ -1463,6 +1534,13 @@ def complete_add(args, tool: str, registry: dict, workspace: Path) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(prog="accsw", description=__doc__.splitlines()[0])
     subparsers = parser.add_subparsers(dest="command")
+    parser.add_argument(
+        "--renew",
+        action="store_const",
+        const=cmd_renew,
+        dest="handler",
+        help="only keep the sign-ins alive; switch nothing (what the background agent runs)",
+    )
     parser.set_defaults(handler=cmd_auto)
 
 
