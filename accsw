@@ -1352,8 +1352,17 @@ def cmd_status(args) -> int:
         loaded = [tool for tool in TOOLS if active.get(tool) == name]
         title = paint(name, BOLD, colour) if loaded else name
         tag = paint("  in use", LOADED, colour) if loaded else ""
-        mean = availability(name, profiles[name], quota)
-        share = paint(f"   {mean:.0f}% free", DIM, colour) if mean is not None else ""
+        # Naming the constraint rather than averaging it away: an account can read
+        # 2% "free" while its 5h window is untouched, because one model's cap is
+        # spent. That number is true and says the wrong thing.
+        binding = []
+        for tool in TOOLS:
+            if tool not in profiles[name]:
+                continue
+            window = deciding_window(quota.get((name, tool)), tool)
+            if window:
+                binding.append(f"{tool} {window[0]} {window[1]:.0f}%")
+        share = paint("   " + "   ".join(binding), DIM, colour) if binding else ""
         one = shared_email(profiles[name])
         address = paint(f"   {one}", DIM, colour) if one else ""
         print(f"{title}{address}{tag}{share}")
