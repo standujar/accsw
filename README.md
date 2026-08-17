@@ -41,6 +41,57 @@ accsw --agent on   run that every 30 min in the background      (--agent off rem
 In the output, `→` means it moved you and `·` means you were already there. `--renew` never switches,
 never opens an app and never asks you to log in — it trades each idle refresh token for a fresh one.
 
+## What `accsw status` looks like
+
+Every account, sorted by how much room it has left, with the window that constrains each tool named
+on the profile line. Addresses are shown too; they are left out here.
+
+```
+pi   claude Fable 88%
+  ○ claude
+      5h    ██░░░░░░░░  22% left   resets in 55m
+      7d    █░░░░░░░░░  12% left   resets in 1d 2h
+      Fable █████████░  88% left   resets in 23h 2m
+
+main   claude Fable 63%   codex 7d 61%
+  ○ claude
+      5h    █████████░  94% left   resets in 36m
+      7d    █░░░░░░░░░  12% left   resets in 11h 32m
+      Fable ██████░░░░  63% left   resets in 5d
+  ○ codex
+      7d    ██████░░░░  61% left   resets in 14h 42m
+
+theta   claude Fable 88%   codex 7d 34%
+  ○ claude
+      5h    ██████░░░░  55% left   resets in 1h 33m
+      7d    █░░░░░░░░░  12% left   resets in 5d 16h
+      Fable █████████░  88% left   resets in 3d
+  ○ codex
+      7d    ███░░░░░░░  34% left   resets in 6h 42m
+
+kappa   claude Fable 97%   codex 7d 8%
+  ○ claude
+      5h    █████████░  94% left   resets in 47m
+      7d    █████░░░░░  49% left   resets in 5d 3h
+      Fable ██████████  97% left   resets in 14h 37m
+  ○ codex
+      7d    █░░░░░░░░░   8% left   resets in 2d 22h
+
+eta   claude Fable 97%   codex 7d 0%
+  ○ claude
+      5h    █████████░  94% left   resets in 2h 47m
+      7d    █████░░░░░  46% left   resets in 3d 17h
+      Fable ██████████  97% left   resets in 5d 23h
+  ○ codex
+      7d    ░░░░░░░░░░   0% left   resets in 18h 11m
+
+…and 15 more, in the same order: roomiest first.
+```
+
+`●` is the account a tool is on right now, `○` one waiting. A window the account cannot use is
+reported alone — a spent week makes its 5-hour figure meaningless, so that line is dropped rather
+than shown as capacity you do not have.
+
 ## Why it does not lapse
 
 A sign-in has one valid refresh token at a time, so whoever refreshes last holds it. A copy left to
