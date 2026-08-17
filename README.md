@@ -29,8 +29,8 @@ accsw run codex exec "…"  # arguments pass straight through
 Worth aliasing: `alias claude='accsw run claude'`.
 
 ```
-accsw save                # capture whoever is signed in, named after their email
-accsw save perso          # ...or name it yourself
+accsw save                # rarely needed: every command already captures whoever is signed in
+accsw save perso          # ...use it only to choose the name yourself
 accsw use perso           # switch both tools, no menu
 accsw use eliza --tool codex   # or just one
 accsw auto                # switch to whichever account has the most headroom
@@ -61,10 +61,11 @@ Accounts whose token has expired are reported as such and never chosen — an ex
 refreshed by switching to that account once. A window past its reset counts as empty, whatever
 number was last recorded for it.
 
-`accsw run` applies that rule and then becomes the tool, so you never switch by hand. It will not
-switch while a session of that tool is already running, and that is a hard constraint rather than
-caution: each tool has exactly one credential slot, so two live sessions cannot hold different
-accounts — whichever refreshes its token last would win for both.
+`accsw run` applies that rule and then becomes the tool, so you never switch by hand.
+
+One structural limit is worth stating plainly: each tool has exactly one credential slot, so two live
+sessions cannot hold different accounts — whichever refreshes its token last wins for both. Claude on
+one account and Codex on another is fine; two Claude Code sessions on two accounts is not.
 
 ## How it works
 
@@ -117,17 +118,22 @@ Override the location with `ACCSW_HOME`.
 
 Credentials are the whole point, so the handling is deliberate:
 
-- **Never in an argument list.** Writes go to `security -i` over stdin, hex-encoded with `-X`, so no
-  secret ever appears in `ps`.
+- **No diagnostic can leak the payload.** `security` echoes its arguments when it fails, so any of its
+  output carrying the credential — or the credential's hex — is dropped rather than interpolated into
+  an error message. This is not theoretical: it is how an earlier version printed 8 KB of live
+  credential to a terminal.
 - **Hex round-trips are decoded.** `security -w` returns hex whenever the stored bytes are not
   printable ASCII. Storing that hex verbatim and writing it back would leave the canonical item
   holding an unparseable string — a bricked login. It is detected and decoded.
+- **Writes are verified.** Every keychain write is read back and compared before anything downstream
+  is allowed to proceed.
 - **Every write is atomic.** Registry, `auth.json` and `~/.claude.json` are written to a temp file
   created at mode 600, fsynced, then `os.replace`d. No truncation window, no world-readable window.
-- **Switching is a swap, not a restore.** Before loading a profile, the credential currently live is
-  parked back into the profile it came from. Without that, a profile's stored blob goes stale as its
-  session refreshes, and switching back would write a dead refresh token — a browser re-login, which
-  is the exact thing this tool exists to avoid.
+- **Nothing is ever only in the slot.** Every command parks whatever is signed in into a profile
+  before doing anything else, so switching is a swap rather than a one-way restore. Without that, a
+  profile's stored blob goes stale as its session refreshes, and switching back would write a dead
+  refresh token — a browser re-login, which is the exact thing this tool exists to avoid. It also
+  means a login made outside accsw is picked up on its own. `ACCSW_ABSORB=0` disables it.
 - **Every leg is checked before any byte is written**, so a switch cannot half-apply.
 - **A failed keychain read is not "no credential".** Only exit 44 means absent; a locked keychain or
   a denied ACL raises, instead of advising a recapture that would overwrite a good parked blob.
