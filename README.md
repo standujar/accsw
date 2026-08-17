@@ -5,8 +5,8 @@ has quota left — across the CLIs, the IDE extensions and the desktop apps — 
 
 ```
 $ accsw
-claude: work — Fable at 63% left
-codex: staying on personal — 7d at 41% left
+  claude  → work                       Fable at 63% left
+  codex   · personal                   7d at 41% left
 ```
 
 Run it whenever. If you are already on the best account it does nothing at all.
@@ -29,7 +29,10 @@ accsw list         which accounts are captured
 accsw add claude   sign in to another account, without logging out of this one
 accsw add codex
 accsw --renew      refresh every sign-in without switching anything
+accsw --agent on   install the hourly renewal agent   (--agent off removes it)
 ```
+
+`→` means it moved you, `·` means it was already there.
 
 `--renew` is what repairs a stale account, and what the background agent runs. It never switches, never
 opens an app, and never asks you to log in — it trades each idle refresh token for a fresh one.
@@ -40,14 +43,18 @@ A sign-in has one valid refresh token at a time, so whoever refreshes last holds
 age loses that race to any process still running on the old credential, and a lost race cannot be
 recovered — that is the re-login this tool exists to avoid.
 
-So an hourly agent is installed on first use, and every run also renews the accounts you are *not*
-on. The one you are on is deliberately left alone: the tool using it refreshes it itself, and taking
-the token out from under a live session is the same bug seen from the other side.
+So every run renews the accounts you are *not* on, and the first run offers an hourly agent that does
+the same in the background. It asks before installing anything, and remembers a refusal. The account
+you are on is deliberately left alone: the tool using it refreshes it itself, and taking the token
+out from under a live session is the same bug seen from the other side.
 
 ```
-launchctl unload ~/Library/LaunchAgents/com.standujar.accsw.plist   # to remove it
-rm ~/Library/LaunchAgents/com.standujar.accsw.plist
+accsw --agent off   # remove it
+accsw --agent on    # put it back
 ```
+
+The agent only ever runs `--renew`. It never switches accounts and never opens an app: a background
+job that moves you off your account mid-task would be worse than the lapse it prevents.
 
 ## Adding your accounts
 

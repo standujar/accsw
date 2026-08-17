@@ -1356,15 +1356,43 @@ AGENT_PLIST = HOME / "Library" / "LaunchAgents" / f"{AGENT_LABEL}.plist"
 RENEW_EVERY = 3600
 
 
-def ensure_agent() -> bool:
-    """Install the hourly renewal agent once, on first use.
+def ensure_agent(registry: dict) -> bool:
+    """Offer the hourly renewal agent once, and take no for an answer.
 
     Without it, keeping sign-ins alive depends on you happening to run accsw often
-    enough — and the one time you do not is the one time an account dies. Removal
-    is one line, printed when it is installed and written in the README.
+    enough — and the one time you do not is the one time an account dies. But it is
+    a permanent thing to leave on someone's machine, so it is asked for, once, and
+    the refusal is remembered.
     """
-    if AGENT_PLIST.exists():
+    if AGENT_PLIST.exists() or registry.get("agent") == "declined":
         return False
+    if not sys.stdin.isatty():
+        return False
+    print("\nSign-ins lapse if nothing refreshes them, and a lapsed one costs a browser login.")
+    print(f"Install an hourly agent that refreshes them? It switches nothing.  [Y/n] ", end="")
+    answer = input().strip().lower()
+    if answer and not answer.startswith("y"):
+        registry["agent"] = "declined"
+        save_registry(registry)
+        note("not installed — `accsw --renew` does the same thing when you run it")
+        return False
+    try:
+        install_agent()
+    except Fail as error:
+        note(str(error))
+        return False
+    return True
+
+
+def remove_agent() -> bool:
+    if not AGENT_PLIST.exists():
+        return False
+    run(["launchctl", "unload", str(AGENT_PLIST)])
+    AGENT_PLIST.unlink()
+    return True
+
+
+def install_agent() -> None:
     binary = Path(sys.argv[0]).resolve()
     AGENT_PLIST.parent.mkdir(parents=True, exist_ok=True)
     AGENT_PLIST.write_text(
@@ -1387,9 +1415,25 @@ def ensure_agent() -> bool:
     result = run(["launchctl", "load", str(AGENT_PLIST)])
     if result.returncode != 0:
         AGENT_PLIST.unlink(missing_ok=True)
-        note(f"could not install the hourly renewal agent: {diagnose(result)}")
-        return False
-    return True
+        raise Fail(f"could not install the renewal agent: {diagnose(result)}")
+
+
+def cmd_agent(args) -> int:
+    registry = load_registry()
+    if args.agent == "off":
+        registry["agent"] = "declined"
+        save_registry(registry)
+        colour = sys.stdout.isatty()
+        print(paint("removed" if remove_agent() else "no agent was installed", DIM, colour))
+        return 0
+    install_agent()
+    registry.pop("agent", None)
+    save_registry(registry)
+    colour = sys.stdout.isatty()
+    print(f"{paint('●', LOADED, colour)} renewal agent installed")
+    print(paint(f"  every {RENEW_EVERY // 60} minutes, switches nothing", DIM, colour))
+    print(paint(f"  log: {STORE / 'renew.log'}", DIM, colour))
+    return 0
 
 
 def cmd_renew(args) -> int:
@@ -1402,13 +1446,18 @@ def cmd_renew(args) -> int:
     registry = load_state()
     kept = renew_parked(registry)
     save_registry(registry)
-    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    colour = sys.stdout.isatty()
+    stamp = paint(datetime.datetime.now().strftime("%H:%M"), DIM, colour)
     if not kept:
-        print(f"{stamp}  every sign-in has time left; nothing to renew")
+        print(f"{stamp}  {paint('every sign-in has time left', DIM, colour)}")
         return 0
     print(f"{stamp}  {len(kept)} touched")
     for line in kept:
-        print(f"  {line}")
+        name, _, reason = line.partition(": ")
+        if reason:
+            print(f"  {paint('✗', '31', colour)} {name:<28} {paint(reason, DIM, colour)}")
+        else:
+            print(f"  {paint('●', LOADED, colour)} {name}")
     return 0
 
 
@@ -1418,7 +1467,7 @@ def cmd_auto(args) -> int:
     registry = load_state()
     if not registry["profiles"]:
         raise Fail("no accounts captured yet — log in to one and run accsw")
-    if ensure_agent():
+    if ensure_agent(registry):
         note(f"installed an hourly renewal agent so sign-ins cannot lapse "
              f"(remove: launchctl unload {AGENT_PLIST} && rm {AGENT_PLIST})")
     kept = renew_parked(registry)
@@ -1432,16 +1481,25 @@ def cmd_auto(args) -> int:
         if name is None:
             note(f"{tool}: {why}")
             continue
+        colour = sys.stdout.isatty()
         if actually_loaded(tool, registry) == name:
             # Nothing changed, so nothing is bounced. Bouncing a window to land on the
             # account it is already on is pure interruption — and when every account is
             # spent, that is every single run. The link is still checked, because it
             # costs nothing and decides where a Dock launch lands.
-            print(f"{tool}: staying on {name} — {why}")
+            print(
+                f"  {paint(f'{tool:<7}', TOOL_COLOUR[tool], colour)} {paint('·', DIM, colour)} "
+                f"{name:<26} {paint(why, DIM, colour)}"
+            )
             continue
-        for line in apply_switch(name, (tool,), registry):
-            print(f"{tool}: {line}")
-        print(f"  → {name}, {why}")
+        outcome = apply_switch(name, (tool,), registry)
+        print(
+            f"  {paint(f'{tool:<7}', TOOL_COLOUR[tool], colour)} {paint('→', LOADED, colour)} "
+            f"{paint(f'{name:<26}', BOLD, colour)} {paint(why, DIM, colour)}"
+        )
+        for line in outcome:
+            if line != "already loaded":
+                print(f"          {paint(line, DIM, colour)}")
         settle_readers((tool,))
     return 0
 
@@ -1535,6 +1593,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="accsw", description=__doc__.splitlines()[0])
     subparsers = parser.add_subparsers(dest="command")
     parser.add_argument(
+        "--agent",
+        choices=("on", "off"),
+        help="install or remove the hourly renewal agent",
+    )
+    parser.add_argument(
         "--renew",
         action="store_const",
         const=cmd_renew,
@@ -1562,6 +1625,8 @@ def main() -> int:
 
 
     args = parser.parse_args()
+    if getattr(args, "agent", None):
+        args.handler = cmd_agent
     try:
         with hold_lock():
             return args.handler(args)
