@@ -21,6 +21,18 @@ accsw add claude # sign in to another account without logging out of this one
 accsw add codex
 ```
 
+## The one thing it cannot do
+
+Claude.app cannot be signed in for you. It authenticates with a **web session cookie**, issued by a
+browser login on claude.ai; what accsw holds is Claude Code's **OAuth token**, issued by a different
+flow for a different purpose. There is no exchange between the two — checked in the app's own code,
+where the only cookie it ever writes itself is `lastActiveOrg`, and the session key is set and
+revoked server-side.
+
+So each Claude account needs one browser sign-in, once, in its own profile. After that the profile
+stays signed in and switching never asks again. ChatGPT.app has no such cost: it reads the same
+credential file as the CLI, which accsw already swaps and renews.
+
 ## Quota
 
 Numbers are read live, one account at a time, every time you open the picker. Each account's own
