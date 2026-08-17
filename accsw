@@ -752,6 +752,13 @@ def format_quota(result) -> str:
     return "   ".join(parts)
 
 
+# One colour per tool so a glance separates them, plus green for what is loaded.
+TOOL_COLOUR = {"claude": "38;5;209", "codex": "38;5;79"}
+LOADED = "38;5;76"
+DIM = "2"
+BOLD = "1"
+
+
 def paint(text: str, code: str, enabled: bool) -> str:
     return f"{ESC}[{code}m{text}{ESC}[0m" if enabled else text
 
@@ -785,8 +792,9 @@ def quota_lines(result, colour: bool) -> list[str]:
         countdown = humanize_reset(resets_at)
         when = f"resets in {countdown}" if countdown else "just reset"
         lines.append(
-            f"{label:<{width}} {paint(bar(left), remaining_colour(left), colour)} "
-            f"{left:>3.0f}% left   {paint(when, '2', colour)}"
+            f"{paint(f'{label:<{width}}', DIM, colour)} "
+            f"{paint(bar(left), remaining_colour(left), colour)} "
+            f"{left:>3.0f}% left   {paint(when, DIM, colour)}"
         )
     return lines
 
@@ -938,12 +946,11 @@ def profile_lines(
     for tool in TOOLS:
         if tool not in entry:
             continue
-        mark = "●" if active.get(tool) == name else "○"
+        here = active.get(tool) == name
+        mark = "●" if here else "○"
         head = f"{name:<{width}}" if not lines else " " * width
         email = (entry[tool].get("email") or "unknown")[:26]
-        lines.append(
-            f"{head}  {mark} {tool:<7} {email:<26} {format_quota(quota.get((name, tool)))}"
-        )
+        lines.append(f"{head}  {mark} {tool:<7} {email:<26} {format_quota(quota.get((name, tool)))}")
     return lines or [f"{name:<{width}}  (nothing captured)"]
 
 
@@ -1213,14 +1220,19 @@ def cmd_status(args) -> int:
         if position:
             print()
         loaded = [tool for tool in TOOLS if active.get(tool) == name]
-        title = name if not loaded else paint(name, "1", colour)
-        print(f"{title}{paint('   loaded: ' + ', '.join(loaded), '2', colour) if loaded else ''}")
+        title = paint(name, BOLD, colour) if loaded else name
+        tag = paint("  in use", LOADED, colour) if loaded else ""
+        print(f"{title}{tag}")
         for tool in TOOLS:
             if tool not in profiles[name]:
                 continue
-            mark = "●" if active.get(tool) == name else "○"
+            here = active.get(tool) == name
+            mark = paint("●", LOADED, colour) if here else paint("○", DIM, colour)
             email = profiles[name][tool].get("email") or "unknown"
-            print(f"  {mark} {tool:<7} {paint(email, '2', colour)}")
+            print(
+                f"  {mark} {paint(f'{tool:<7}', TOOL_COLOUR[tool], colour)} "
+                f"{paint(email, DIM, colour)}"
+            )
             age = ages.get((name, tool))
             for line in quota_lines(quota.get((name, tool)), colour):
                 print(f"      {line}")
