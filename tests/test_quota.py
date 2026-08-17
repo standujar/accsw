@@ -118,12 +118,10 @@ windows = accsw.codex_quota("token")
 check("only the reported window", [label for label, _, _ in windows], ["7d"])
 check("exhausted account reads 100 used", windows[0][1], 100.0)
 check("no headroom left", accsw.headroom(windows), 0.0)
-check_that("renders as empty", accsw.format_quota(windows).startswith("7d ░░░░░░"), accsw.format_quota(windows))
 
 print("a payload with no rate_limit yields no windows rather than a wrong gauge")
 accsw.http_get_json = lambda url, token: {"plan_type": "pro"}
 check("no windows", accsw.codex_quota("token"), [])
-check("formatted as a notice", accsw.format_quota([]), "— no window reported")
 
 print("the binding window is named, so a spent model does not read as a dead account")
 check("names the worst window", accsw.binding_window([("5h", 2.0, None), ("Fable", 100.0, None)]), ("Fable", 0.0))
@@ -267,13 +265,8 @@ check("expired window reads as empty", accsw.effective_percent(99.0, now - 60), 
 check("unknown reset keeps its number", accsw.effective_percent(38.0, None), 38.0)
 check("headroom follows the rollover", accsw.headroom([("7d", 99.0, now - 60)]), 100.0)
 
-print("format_quota reports what is LEFT, and surfaces failures verbatim")
-check("error text shown", accsw.format_quota(accsw.Fail("token expired")), "— token expired")
-check_that(
-    "compact picker line reads as remaining",
-    accsw.format_quota([("5h", 38.0, now + 2 * HOUR)]) == "5h ████░░  62% 2h",
-    accsw.format_quota([("5h", 38.0, now + 2 * HOUR)]),
-)
+print("failures are surfaced verbatim")
+check("error text shown", accsw.quota_lines(accsw.Fail("token expired"), False), ["— token expired"])
 
 print("status lines are aligned, one per window, and colour-free when not a terminal")
 lines = accsw.quota_lines([("5h", 38.0, now + 2 * HOUR), ("7d", 90.0, now + 3 * DAY)], False)

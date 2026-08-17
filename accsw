@@ -739,18 +739,6 @@ def humanize_reset(timestamp: int | None) -> str:
     return f"{minutes}m"
 
 
-def format_quota(result) -> str:
-    if isinstance(result, Fail):
-        return f"— {result}"
-    if not result:
-        return "— no window reported"
-    parts = []
-    for label, percent, resets_at in result:
-        left = 100.0 - effective_percent(percent, resets_at)
-        countdown = humanize_reset(resets_at) or "now"
-        parts.append(f"{label} {bar(left, 6)} {left:>3.0f}% {countdown}")
-    return "   ".join(parts)
-
 
 # One colour per tool so a glance separates them, plus green for what is loaded.
 TOOL_COLOUR = {"claude": "38;5;209", "codex": "38;5;79"}
@@ -877,81 +865,8 @@ def binding_window(result) -> tuple[str, float] | None:
 ESC = "\x1b"
 
 
-def read_key(fd: int) -> str:
-    import select
-
-    char = os.read(fd, 1).decode(errors="ignore")
-    if char != ESC:
-        return char
-    if not select.select([fd], [], [], 0.05)[0]:
-        return "escape"
-    sequence = os.read(fd, 2).decode(errors="ignore")
-    return {"[A": "up", "[B": "down"}.get(sequence, "escape")
 
 
-def draw(entries: list[list[str]], index: int, redraw: bool) -> None:
-    width = shutil.get_terminal_size((100, 24)).columns - 4
-    if redraw:
-        sys.stdout.write(f"{ESC}[{sum(len(lines) for lines in entries)}A")
-    for position, lines in enumerate(entries):
-        selected = position == index
-        for offset, line in enumerate(lines):
-            marker = "❯" if selected and offset == 0 else " "
-            body = line[:width]
-            style = f"{ESC}[7m" if selected else f"{ESC}[2m"
-            sys.stdout.write(f"{ESC}[2K {marker} {style} {body} {ESC}[0m\r\n")
-    sys.stdout.flush()
-
-
-def choose(entries: list[list[str]], start: int) -> int | str | None:
-    """Inline picker over multi-line entries. Returns an index, "auto", or None."""
-    import termios
-    import tty
-
-    if not sys.stdin.isatty():
-        raise Fail("not a terminal — name the profile explicitly, e.g. `accsw use perso`")
-
-    fd = sys.stdin.fileno()
-    saved = termios.tcgetattr(fd)
-    index = start
-    sys.stdout.write(f"{ESC}[?25l")
-    try:
-        tty.setraw(fd)
-        draw(entries, index, redraw=False)
-        while True:
-            key = read_key(fd)
-            if key in ("up", "k"):
-                index = (index - 1) % len(entries)
-            elif key in ("down", "j"):
-                index = (index + 1) % len(entries)
-            elif key in ("\r", "\n"):
-                return index
-            elif key == "a":
-                return "auto"
-            elif key in ("q", "escape", "\x03"):
-                return None
-            else:
-                continue
-            draw(entries, index, redraw=True)
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
-        sys.stdout.write(f"{ESC}[?25h")
-        sys.stdout.flush()
-
-
-def profile_lines(
-    name: str, entry: dict, active: dict, quota: dict, width: int
-) -> list[str]:
-    lines = []
-    for tool in TOOLS:
-        if tool not in entry:
-            continue
-        here = active.get(tool) == name
-        mark = "●" if here else "○"
-        head = f"{name:<{width}}" if not lines else " " * width
-        email = (entry[tool].get("email") or "unknown")[:26]
-        lines.append(f"{head}  {mark} {tool:<7} {email:<26} {format_quota(quota.get((name, tool)))}")
-    return lines or [f"{name:<{width}}  (nothing captured)"]
 
 
 def best_profile(
@@ -992,33 +907,6 @@ def best_profile(
     return name, "no account answered; this one's token refreshes on first use"
 
 
-def pick_profile(registry: dict) -> str | None:
-    profiles = registry["profiles"]
-    if not profiles:
-        raise Fail("no profiles yet — capture the current login with `accsw save <name>`")
-    active = registry.get("active", {})
-    names = sorted(profiles)
-    width = max(len(name) for name in names)
-
-    print("reading quota…", end="", flush=True)
-    quota, ages = gather_quota(registry)
-    print(f"\r{ESC}[2Kswitch account   ↑↓ move   ↵ select   a auto   q cancel")
-
-    entries = [profile_lines(name, profiles[name], active, quota, width) for name in names]
-    current = next((i for i, name in enumerate(names) if active.get("claude") == name), 0)
-
-    chosen = choose(entries, current)
-    if chosen is None:
-        print("cancelled")
-        return None
-    if chosen == "auto":
-        name, why = best_profile(registry, quota)
-        if name is None:
-            raise Fail(why)
-        print(f"auto-picked {name} — {why}")
-        return name
-    return names[chosen]
-
 
 # ----------------------------------------------------------------- commands
 
@@ -1034,6 +922,56 @@ def selected_tools(args) -> tuple[str, ...]:
 GUI_APPS = {"claude": "Claude", "codex": "ChatGPT"}
 
 
+# Claude.app reads CLAUDE_USER_DATA_DIR and CLAUDE_CONFIG_DIR at startup, both
+# ungated, and holds no single-instance lock. So each account gets its own profile
+# and stays signed in there — nothing to swap, nothing to identify.
+CLAUDE_APP_DATA = STORE / "claude-app"
+CLAUDE_APP_CONFIG = STORE / "claude-config"
+CLAUDE_BINARY = Path("/Applications/Claude.app/Contents/MacOS/Claude")
+
+
+def quit_app(name: str) -> None:
+    if not app_running(name):
+        return
+    run(["osascript", "-e", f'tell application "{name}" to quit'])
+    for _ in range(24):
+        if not app_running(name):
+            return
+        time.sleep(0.25)
+    raise Fail(f"{name} did not quit; it was left on its current account")
+
+
+def launch_claude_app(profile: str) -> None:
+    """Open Claude.app on this profile's own data and config directories.
+
+    CLAUDE_CONFIG_DIR also decides the keychain service the app's built-in Claude
+    Code reads, so the credential is placed there too — otherwise the window shows
+    one account while its coding half uses another.
+    """
+    if not CLAUDE_BINARY.exists():
+        return
+    data = CLAUDE_APP_DATA / profile
+    config = CLAUDE_APP_CONFIG / profile
+    for directory in (data, config):
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(0o700)
+    blob = keychain_read(profile_service(profile))
+    if blob:
+        keychain_write(claude_namespaced_service(config), blob, f"accsw claude app — {profile}")
+    quit_app("Claude")
+    subprocess.Popen(
+        [str(CLAUDE_BINARY)],
+        env={
+            **os.environ,
+            "CLAUDE_USER_DATA_DIR": str(data),
+            "CLAUDE_CONFIG_DIR": str(config),
+        },
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
 def app_running(name: str) -> bool:
     result = run(
         [
@@ -1047,31 +985,34 @@ def app_running(name: str) -> bool:
 
 def restart_app(name: str) -> None:
     """Ask the app to quit — never kill it — then bring it back."""
-    run(["osascript", "-e", f'tell application "{name}" to quit'])
-    for _ in range(24):
-        if not app_running(name):
-            break
-        time.sleep(0.25)
-    else:
-        raise Fail(f"{name} did not quit; relaunch it yourself to pick up the switch")
+    quit_app(name)
     run(["open", "-a", name])
 
 
-def settle_readers(tools: tuple[str, ...], restart: bool) -> None:
-    """Bring the desktop apps back on the credential that was just installed.
+def settle_readers(
+    tools: tuple[str, ...], restart: bool, profile: str | None, registry: dict
+) -> None:
+    """Put the desktop apps on the account that was just installed.
 
-    Both read the same slot as the CLI but cache it at startup, so a switch reaches
-    them on relaunch and not before.
+    ChatGPT.app reads $CODEX_HOME/auth.json — the very slot that was swapped — so a
+    relaunch is enough. Claude.app is opened on this profile's own directories.
     """
     for tool in tools:
         name = GUI_APPS[tool]
         if not app_running(name):
             continue
-        if restart:
-            restart_app(name)
-            note(f"restarted {name}")
+        if not restart:
+            note(f"{name} keeps the old account until you quit and reopen it")
+            continue
+        if tool == "claude" and profile:
+            if registry.get("app_profile") == profile and app_running(name):
+                continue
+            launch_claude_app(profile)
+            registry["app_profile"] = profile
+            note(f"reopened {name} on {profile}")
         else:
-            note(f"{name} keeps the old session until you quit and reopen it")
+            restart_app(name)
+            note(f"reopened {name}")
     for tool in tools:
         if running(tool):
             note(f"open {tool} sessions keep the old account; new ones start on the new one")
@@ -1110,100 +1051,32 @@ def apply_switch(profile: str, tools: tuple[str, ...], registry: dict) -> list[s
     return outcome
 
 
-def cmd_save(args) -> int:
-    registry = load_state()
-    if args.profile is None:
-        args.profile, discovered = derive_profile(registry)
-        print(f"found {discovered} logged in — capturing as {args.profile!r}")
-    tools = selected_tools(args)
-    saved = []
-    skipped = []
-    for tool in tools:
-        try:
-            email = CAPTURE[tool](args.profile, registry, args.replace)
-            saved.append(f"{tool}: {email}")
-        except Fail as error:
-            if args.tool:
-                raise
-            skipped.append(f"skipped {tool} — {error}")
-    if not saved:
-        raise Fail("; ".join(skipped) or "nothing captured")
-    save_registry(registry)
-    print(f"saved profile {args.profile!r}")
-    for line in saved + skipped:
-        print(f"  {line}")
-    return 0
 
 
-def cmd_use(args) -> int:
-    registry = load_state()
-    if args.profile is None:
-        args.profile = pick_profile(registry)
-        if args.profile is None:
-            return 0
-    elif args.profile not in registry["profiles"]:
-        raise Fail(f"unknown profile {args.profile!r} — see `accsw list`")
-    wanted = selected_tools(args)
-    entry = registry["profiles"][args.profile]
-    tools = tuple(tool for tool in wanted if tool in entry)
-    if not tools:
-        raise Fail(f"profile {args.profile!r} holds no account for {', '.join(wanted)}")
-    warn_running(tools)
-    switched = apply_switch(args.profile, tools, registry)
-    print(f"switched to {args.profile!r}")
-    for line in switched:
-        print(f"  {line}")
-    settle_readers(tools, args.restart)
-    return 0
 
 
-def cmd_run(args) -> int:
-    """Pick the roomiest account, switch to it, then become the tool."""
-    tool = args.tool_name
-    registry = load_state()
-    binary = shutil.which(tool)
-    if binary is None:
-        raise Fail(f"{tool} is not on PATH")
-
-    if not registry["profiles"]:
-        note("no profiles captured yet — run `accsw save`")
-    else:
-        quota, _ = gather_quota(registry, (tool,))
-        name, why = best_profile(registry, quota, (tool,))
-        if name is None:
-            note(f"{why} — staying on the loaded account")
-        elif registry.get("active", {}).get(tool) == name:
-            note(f"{tool} already on {name} — {why}")
-        else:
-            warn_running((tool,))
-            apply_switch(name, (tool,), registry)
-            note(f"switched {tool} to {name} — {why}")
-
-    os.execv(binary, [binary, *args.rest])
-
-
-def note(message: str) -> None:
-    """Chatter from the wrapper goes to stderr so it never pollutes piped output."""
-    print(f"accsw: {message}", file=sys.stderr)
 
 
 def cmd_list(args) -> int:
     registry = load_state()
     profiles = registry["profiles"]
     if not profiles:
-        print("no profiles yet — capture the current login with `accsw save <name>`")
+        print("no accounts yet — `accsw add claude` or `accsw add codex`")
         return 0
     active = registry.get("active", {})
+    colour = sys.stdout.isatty()
     width = max(len(name) for name in profiles)
-    for name, entry in sorted(profiles.items()):
-        marks = []
+    for name in sorted(profiles):
+        held = []
         for tool in TOOLS:
-            if tool not in entry:
+            if tool not in profiles[name]:
                 continue
-            flag = "*" if active.get(tool) == name else " "
-            marks.append(f"{flag}{tool}: {entry[tool].get('email') or 'unknown'}")
-        print(f"{name:<{width}}  " + "   ".join(marks))
-    print("\n* = currently loaded")
+            mark = paint("●", LOADED, colour) if active.get(tool) == name else paint("○", DIM, colour)
+            held.append(
+                f"{mark} {paint(tool, TOOL_COLOUR[tool], colour)} "
+                f"{paint(profiles[name][tool].get('email') or 'unknown', DIM, colour)}"
+            )
+        print(f"{name:<{width}}  " + "   ".join(held))
     return 0
 
 
@@ -1263,7 +1136,7 @@ def cmd_auto(args) -> int:
             print(f"{tool}: {line}")
         print(f"  → {name}, {why}")
         moved = True
-        settle_readers((tool,), args.restart)
+        settle_readers((tool,), args.restart, name, registry)
     if not moved:
         return 0
     return 0
@@ -1343,26 +1216,6 @@ def cmd_add(args) -> int:
     return 0
 
 
-def cmd_rm(args) -> int:
-    registry = load_registry()
-    if args.profile not in registry["profiles"]:
-        raise Fail(f"unknown profile {args.profile!r}")
-    if args.profile in registry.get("active", {}).values() and not args.yes:
-        raise Fail(
-            f"{args.profile!r} is the profile currently loaded — forgetting it drops the only "
-            "parked copy of that token. Switch elsewhere first, or pass --yes."
-        )
-    keychain_delete(profile_service(args.profile))
-    stored_codex = CODEX_VAULT / f"{args.profile}.json"
-    if stored_codex.is_file():
-        stored_codex.unlink()
-    del registry["profiles"][args.profile]
-    for tool, name in list(registry.get("active", {}).items()):
-        if name == args.profile:
-            del registry["active"][tool]
-    save_registry(registry)
-    print(f"removed profile {args.profile!r} (the live login is untouched)")
-    return 0
 
 
 def main() -> int:
@@ -1372,33 +1225,8 @@ def main() -> int:
 
     tool_flag = dict(choices=TOOLS, help="act on one tool only (default: both)")
 
-    save = subparsers.add_parser("save", help="capture the currently logged-in account")
-    save.add_argument(
-        "profile", nargs="?", help="omit to name it after whoever is logged in"
-    )
-    save.add_argument("--tool", **tool_flag)
-    save.add_argument(
-        "--replace",
-        action="store_true",
-        help="rebind the profile even if a different account is logged in",
-    )
-    save.set_defaults(handler=cmd_save)
 
-    use = subparsers.add_parser("use", help="switch to a captured account")
-    use.add_argument("profile", nargs="?", help="omit to pick from a menu")
-    use.add_argument("--tool", **tool_flag)
-    use.add_argument(
-        "--no-restart",
-        dest="restart",
-        action="store_false",
-        help="leave the desktop apps alone instead of reopening them",
-    )
-    use.set_defaults(handler=cmd_use)
 
-    pick = subparsers.add_parser("pick", help="choose an account from a menu")
-    pick.add_argument("--tool", **tool_flag)
-    pick.add_argument("--no-restart", dest="restart", action="store_false")
-    pick.set_defaults(handler=cmd_use, profile=None)
 
     adding = subparsers.add_parser("add", help="sign in to another account and keep it")
     adding.add_argument("tool_name", choices=TOOLS)
@@ -1411,29 +1239,8 @@ def main() -> int:
     status = subparsers.add_parser("status", help="show who is logged in, with quota")
     status.set_defaults(handler=cmd_status)
 
-    launch = subparsers.add_parser(
-        "run", help="pick the roomiest account, switch to it, then launch the tool"
-    )
-    launch.add_argument("tool_name", choices=TOOLS)
-    launch.add_argument("rest", nargs=argparse.REMAINDER, help="arguments passed through")
-    launch.set_defaults(handler=cmd_run)
 
-    auto = subparsers.add_parser("auto", help="switch to the account with the most headroom")
-    auto.add_argument("--tool", **tool_flag)
-    auto.add_argument(
-        "--no-restart",
-        dest="restart",
-        action="store_false",
-        help="leave the desktop apps alone instead of reopening them",
-    )
-    auto.set_defaults(handler=cmd_auto)
 
-    remove = subparsers.add_parser("rm", help="forget a profile")
-    remove.add_argument("profile")
-    remove.add_argument(
-        "--yes", action="store_true", help="forget it even if it is the loaded profile"
-    )
-    remove.set_defaults(handler=cmd_rm)
 
     args = parser.parse_args()
     try:

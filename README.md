@@ -1,57 +1,24 @@
 # accsw
 
-Switch Claude Code and the Codex CLI between accounts without ever logging out.
-
-Capture each account once, then flip between them in a second. No re-auth, no device codes,
-no browser round-trip.
-
-Run it with no arguments and it puts you on the best account, completely — credential swapped and
-the desktop apps reopened on it. Nothing to name, no flag to remember:
+Switch Claude Code and Codex between accounts without ever logging out — and put the desktop apps on
+the same account while you are at it.
 
 ```
 $ accsw
-switched to 'perso'
-  claude: stan@perso.com
-accsw: restarted Claude
+claude: developer — Fable at 20% left
+accsw: reopened Claude on developer
+codex: staying on stan — 7d at 62% left
 ```
 
-It is a no-op when you are already on the roomiest account, so running it costs nothing.
-
-`accsw pick` opens the menu when you'd rather choose:
-
-```
-$ accsw pick
-switch account   ↑↓ move   ↵ select   a auto   q cancel
- ❯  eliza  ● claude  developer@elizalabs.ai     5h ████░░   62% 2h    7d ███░░░   29% 3d
-           ● codex   dev@eliza.ai               5h █░░░░░   12% 45m   7d ░░░░░░    9% 5d
-    perso  ○ claude  stan@perso.com             5h ██████  100% 4h    7d █████░   82% 6d
-           ○ codex   stan@perso.com             — token expired — switch to this account once to refresh it
-```
-
-Percentages are what is **left**. `●` is the account currently loaded, `○` a captured one waiting.
-Arrows or `j`/`k` move, `↵` switches, `a` picks the roomiest account automatically, `q` backs out.
-
-Or never think about it at all — launch through `run` and it lands on the roomiest account:
+That is the whole daily surface. Run it and you are on the account with the most left; run it again
+and it does nothing, because nothing needed doing.
 
 ```
-accsw run claude          # picks the account with the most left, switches, launches claude
-accsw run codex exec "…"  # arguments pass straight through
-accsw use perso --no-restart   # switch but leave the desktop apps alone
-```
-
-Worth aliasing: `alias claude='accsw run claude'`.
-
-```
-accsw save                # rarely needed: every command already captures whoever is signed in
-accsw save perso          # ...use it only to choose the name yourself
-accsw use perso           # switch both tools, no menu
-accsw use eliza --tool codex   # or just one
-accsw auto                # switch to whichever account has the most headroom
-accsw auto --tool codex   # ...judged on Codex quota alone
-accsw status              # who am I right now, with live quota
-accsw list                # what's captured
-accsw save perso --replace  # rebind a profile to a different account, on purpose
-accsw rm perso            # forget a profile (never logs anything out)
+accsw            # go to the best account, and open the apps on it
+accsw status     # every account, with what is left and when it comes back
+accsw list       # who is captured
+accsw add claude # sign in to another account without logging out of this one
+accsw add codex
 ```
 
 ## Quota
@@ -60,6 +27,10 @@ Numbers are read live, one account at a time, every time you open the picker. Ea
 stored token queries its own usage, so you see every account's state without switching to it. The
 reads are sequential on purpose — a burst of simultaneous authenticated requests for several
 different accounts from one address is the shape anti-abuse systems act on.
+
+Claude is chosen on **Fable first, then the 5h window, then the week** — the order in which those
+limits actually stop work. A spent *model* window only steers the choice; a spent *unscoped* window
+disqualifies the account outright, and its 5h line is hidden because it can read 100% and buy nothing.
 
 - **Claude** — `GET api.anthropic.com/api/oauth/usage`, which reports a `five_hour` and a `seven_day`
   window, each with a utilization percentage and a reset timestamp.
