@@ -831,25 +831,49 @@ def selected_tools(args) -> tuple[str, ...]:
     return (args.tool,) if args.tool else TOOLS
 
 
-# Long-lived readers of the same credential slot. They cache the token in memory at
-# startup, so a switch reaches them only when they are restarted.
-SLOT_READERS = {
-    "claude": ("Claude Code sessions and the Cursor/VSCode extension", None),
-    "codex": ("ChatGPT.app", "/Applications/ChatGPT.app/Contents/"),
-}
+# Desktop apps that read the same credential slot — both verified to query it the
+# same way the CLI does. They cache the token at startup, so a switch reaches them
+# only on relaunch. IDE extensions are absent on purpose: they spawn a fresh CLI
+# process per session, so a NEW chat already picks up the new account.
+GUI_APPS = {"claude": "Claude", "codex": "ChatGPT"}
 
 
-def running_matching(marker: str) -> int:
-    result = run(["pgrep", "-f", marker])
-    return len(result.stdout.split()) if result.returncode == 0 else 0
+def app_running(name: str) -> bool:
+    result = run(
+        [
+            "osascript",
+            "-e",
+            f'tell application "System Events" to (name of processes) contains "{name}"',
+        ]
+    )
+    return result.stdout.strip() == "true"
 
 
-def restart_hint(tools: tuple[str, ...]) -> None:
+def restart_app(name: str) -> None:
+    """Ask the app to quit — never kill it — then bring it back."""
+    run(["osascript", "-e", f'tell application "{name}" to quit'])
+    for _ in range(24):
+        if not app_running(name):
+            break
+        time.sleep(0.25)
+    else:
+        raise Fail(f"{name} did not quit; relaunch it yourself to pick up the switch")
+    run(["open", "-a", name])
+
+
+def settle_readers(tools: tuple[str, ...], restart: bool) -> None:
     for tool in tools:
-        label, marker = SLOT_READERS[tool]
-        count = running_matching(marker) if marker else len(running(tool))
-        if count:
-            note(f"{label}: still on the old account until restarted")
+        name = GUI_APPS[tool]
+        if not app_running(name):
+            continue
+        if restart:
+            restart_app(name)
+            note(f"restarted {name}")
+        else:
+            note(f"{name} keeps the old account until you quit and reopen it (--restart does it)")
+    for tool in tools:
+        if running(tool):
+            note(f"open {tool} sessions keep the old account; new ones start on the new one")
 
 
 def warn_running(tools: tuple[str, ...]) -> None:
@@ -928,7 +952,7 @@ def cmd_use(args) -> int:
     print(f"switched to {args.profile!r}")
     for line in switched:
         print(f"  {line}")
-    restart_hint(tools)
+    settle_readers(tools, args.restart)
     return 0
 
 
@@ -1054,7 +1078,7 @@ def cmd_rm(args) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(prog="accsw", description=__doc__.splitlines()[0])
     subparsers = parser.add_subparsers(dest="command")
-    parser.set_defaults(handler=cmd_use, profile=None, tool=None)
+    parser.set_defaults(handler=cmd_use, profile=None, tool=None, restart=False)
 
     tool_flag = dict(choices=TOOLS, help="act on one tool only (default: both)")
 
@@ -1073,6 +1097,11 @@ def main() -> int:
     use = subparsers.add_parser("use", help="switch to a captured account")
     use.add_argument("profile", nargs="?", help="omit to pick from a menu")
     use.add_argument("--tool", **tool_flag)
+    use.add_argument(
+        "--restart",
+        action="store_true",
+        help="quit and reopen the desktop apps so they pick up the new account",
+    )
     use.set_defaults(handler=cmd_use)
 
     listing = subparsers.add_parser("list", help="list captured profiles")
@@ -1090,6 +1119,11 @@ def main() -> int:
 
     auto = subparsers.add_parser("auto", help="switch to the account with the most headroom")
     auto.add_argument("--tool", **tool_flag)
+    auto.add_argument(
+        "--restart",
+        action="store_true",
+        help="quit and reopen the desktop apps so they pick up the new account",
+    )
     auto.set_defaults(handler=cmd_auto)
 
     remove = subparsers.add_parser("rm", help="forget a profile")
