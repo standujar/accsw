@@ -171,8 +171,14 @@ quota_broken = {
     ("eliza", "claude"): [("7d", 99.0, None)],
     ("eliza", "codex"): [("7d", 99.0, None)],
 }
-check("falls back to the only known one", accsw.best_profile(registry, quota_broken)[0], "eliza")
-check("all unknown returns nothing", accsw.best_profile(registry, {})[0], None)
+check("prefers the account it could measure", accsw.best_profile(registry, quota_broken)[0], "eliza")
+
+print("an unreadable account is ranked last, not discarded")
+name, why = accsw.best_profile(registry, {})
+check_that("still returns a candidate", name in ("perso", "eliza"), repr(name))
+check_that("says the token refreshes on use", "refreshes on first use" in why, why)
+check("no captured profile for the tool returns nothing",
+      accsw.best_profile({"profiles": {}, "active": {}}, {})[0], None)
 
 print("a window past its reset has rolled over, whatever the stored number said")
 check("future window keeps its number", accsw.effective_percent(38.0, now + HOUR), 38.0)

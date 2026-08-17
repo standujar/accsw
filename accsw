@@ -207,6 +207,106 @@ def running(tool: str) -> list[int]:
     return sorted(pids)
 
 
+# -------------------------------------------------------------- app sessions
+
+# The desktop app signs in with a web session, not the credential Claude Code uses,
+# so it needs its own locker. Only the parts that carry the login move; caches do not.
+CLAUDE_APP_DIR = HOME / "Library" / "Application Support" / "Claude"
+APP_SESSION_PARTS = ("Cookies", "Cookies-journal", "Local Storage", "Session Storage")
+APP_VAULT = STORE / "appsession"
+EMAIL_PATTERN = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
+
+
+def claude_app_identity() -> str | None:
+    """Whose session the app currently holds, read out of its Local Storage.
+
+    Ambiguity is treated as unknown: guessing here would file a session under the
+    wrong account, and the whole point of the locker is that it never does that.
+    """
+    import re
+
+    storage = CLAUDE_APP_DIR / "Local Storage"
+    if not storage.is_dir():
+        return None
+    found: set[str] = set()
+    for path in storage.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            found.update(re.findall(EMAIL_PATTERN, path.read_bytes().decode("latin-1")))
+        except OSError:
+            continue
+    real = {address for address in found if not address.endswith((".png", ".svg", ".js"))}
+    return real.pop() if len(real) == 1 else None
+
+
+def app_session_present() -> bool:
+    return (CLAUDE_APP_DIR / "Cookies").is_file()
+
+
+def copy_session(source: Path, destination: Path) -> None:
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True)
+    destination.chmod(0o700)
+    for part in APP_SESSION_PARTS:
+        origin = source / part
+        if not origin.exists():
+            continue
+        target = destination / part
+        if origin.is_dir():
+            shutil.copytree(origin, target)
+        else:
+            shutil.copyfile(origin, target)
+
+
+def capture_app_session(profile: str) -> None:
+    """Park the app's current session. The app must be closed: it holds SQLite open."""
+    copy_session(CLAUDE_APP_DIR, APP_VAULT / profile)
+
+
+def restore_app_session(profile: str) -> None:
+    stored = APP_VAULT / profile
+    if not (stored / "Cookies").is_file():
+        raise Fail(f"profile {profile!r} has no parked app session")
+    for part in APP_SESSION_PARTS:
+        origin = stored / part
+        target = CLAUDE_APP_DIR / part
+        if not origin.exists():
+            continue
+        if target.exists():
+            shutil.rmtree(target) if target.is_dir() else target.unlink()
+        if origin.is_dir():
+            shutil.copytree(origin, target)
+        else:
+            shutil.copyfile(origin, target)
+
+
+def switch_app_session(profile: str, registry: dict) -> bool:
+    """Swap the desktop app onto `profile`, parking whatever it holds first."""
+    if not app_session_present() or not (APP_VAULT / profile / "Cookies").is_file():
+        return False
+    if registry.get("app_session") == profile:
+        return False
+    was_running = app_running("Claude")
+    if was_running:
+        run(["osascript", "-e", 'tell application "Claude" to quit'])
+        for _ in range(24):
+            if not app_running("Claude"):
+                break
+            time.sleep(0.25)
+        else:
+            raise Fail("Claude did not quit; its session was left untouched")
+    holder = claude_app_identity()
+    if holder:
+        capture_app_session(name_for(holder, "claude", registry))
+    restore_app_session(profile)
+    registry["app_session"] = profile
+    if was_running:
+        run(["open", "-a", "Claude"])
+    return True
+
+
 # ------------------------------------------------------------------ identity
 
 
@@ -333,7 +433,24 @@ def absorb_live(registry: dict) -> list[str]:
             continue
         CAPTURE[tool](name, registry, replace=True)
         absorbed.append(f"{tool}: {email} → {name}")
+    absorbed.extend(absorb_app_session(registry))
     return absorbed
+
+
+def absorb_app_session(registry: dict) -> list[str]:
+    """Park the desktop app's session — only while it is closed, since it holds SQLite open."""
+    if not app_session_present() or app_running("Claude"):
+        return []
+    holder = claude_app_identity()
+    if holder is None:
+        return []
+    name = name_for(holder, "claude", registry)
+    if registry.get("app_session") == name and (APP_VAULT / name / "Cookies").is_file():
+        return []
+    capture_app_session(name)
+    registry["app_session"] = name
+    registry["profiles"].setdefault(name, {})["claude_app"] = {"email": holder}
+    return [f"Claude app: {holder} → {name}"]
 
 
 def guard_rebind(profile: str, tool: str, registry: dict, email: str | None, replace: bool) -> None:
@@ -449,6 +566,7 @@ def load_state() -> dict:
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 HTTP_TIMEOUT = 6
+QUOTA_TTL = 120
 
 # The unscoped windows get short names; anything model-scoped is named after its model.
 CLAUDE_WINDOWS = {"session": "5h", "weekly_all": "7d"}
@@ -614,12 +732,20 @@ def gather_quota(registry: dict, tools: tuple[str, ...] = TOOLS) -> dict[tuple[s
         for tool in tools
         if tool in entry
     ]
+    cache = registry.setdefault("quota_cache", {})
+    fresh = int(time.time()) - QUOTA_TTL
     snapshot = {}
     for position, (name, tool) in enumerate(jobs):
+        cached = cache.get(f"{name}|{tool}")
+        if cached and cached["at"] > fresh:
+            snapshot[(name, tool)] = [tuple(window) for window in cached["windows"]]
+            continue
         if position:
             time.sleep(0.15)
         try:
-            snapshot[(name, tool)] = QUOTA[tool](profile_token(tool, name))
+            windows = QUOTA[tool](profile_token(tool, name))
+            cache[f"{name}|{tool}"] = {"at": int(time.time()), "windows": windows}
+            snapshot[(name, tool)] = windows
         except Fail as error:
             snapshot[(name, tool)] = error
         except Exception as error:  # a quota probe must never take the switcher down
@@ -791,21 +917,29 @@ def profile_lines(
 def best_profile(
     registry: dict, quota: dict, tools: tuple[str, ...] = TOOLS
 ) -> tuple[str | None, str]:
-    """The account whose most-constrained window is least used. Ties keep the active one."""
+    """The account whose most-constrained window is least used. Ties keep the active one.
+
+    An account whose quota could not be read is still eligible, ranked last. A stale
+    access token is not a dead account — the tool refreshes it on first use — and
+    skipping it outright meant a perfectly usable account could never be chosen.
+    """
     active = registry.get("active", {})
-    scored = []
+    ranked = []
     for name, entry in registry["profiles"].items():
-        margins = [headroom(quota.get((name, tool))) for tool in tools if tool in entry]
-        known = [margin for margin in margins if margin is not None]
-        if not known:
+        relevant = [tool for tool in tools if tool in entry]
+        if not relevant:
             continue
+        margins = [headroom(quota.get((name, tool))) for tool in relevant]
+        known = [margin for margin in margins if margin is not None]
         loaded = any(active.get(tool) == name for tool in tools)
-        scored.append((min(known), loaded, name))
-    if not scored:
-        return None, "no account reported usable quota"
-    scored.sort(key=lambda row: (-row[0], not row[1], row[2]))
-    margin, _, name = scored[0]
-    return name, f"{margin:.0f}% left in its tightest window"
+        ranked.append((1 if known else 0, min(known) if known else 0.0, loaded, name))
+    if not ranked:
+        return None, "no account is captured for that tool"
+    ranked.sort(key=lambda row: (-row[0], -row[1], not row[2], row[3]))
+    measured, margin, _, name = ranked[0]
+    if measured:
+        return name, f"{margin:.0f}% left in its tightest window"
+    return name, "no account reported quota; its token refreshes on first use"
 
 
 def pick_profile(registry: dict) -> str | None:
@@ -961,6 +1095,9 @@ def cmd_use(args) -> int:
         raise Fail(f"profile {args.profile!r} holds no account for {', '.join(wanted)}")
     warn_running(tools)
     switched = apply_switch(args.profile, tools, registry)
+    if "claude" in tools and switch_app_session(args.profile, registry):
+        save_registry(registry)
+        switched.append("Claude app: session swapped")
     print(f"switched to {args.profile!r}")
     for line in switched:
         print(f"  {line}")
