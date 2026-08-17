@@ -61,7 +61,7 @@ The two are chosen independently, because they are two separate logins.
 | | follows | how |
 |---|---|---|
 | `claude` CLI | yes | reads the credential accsw swaps |
-| Claude Code in Cursor / VSCode | yes | same credential; a *new* chat starts on the new account |
+| Claude Code in Cursor / VSCode | yes | same credential, but the extension host caches it — **reload the window** (`Cmd-Shift-P` → Reload Window) |
 | `codex` CLI | yes | reads the file accsw swaps |
 | ChatGPT desktop app | yes | same file; accsw reopens it |
 | Claude desktop app — coding side | yes | same credential |

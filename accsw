@@ -1229,7 +1229,14 @@ def settle_readers(tools: tuple[str, ...], profile: str | None, registry: dict) 
             note(f"opened {name}")
     for tool in tools:
         if running(tool):
-            note(f"open {tool} sessions keep the old account; new ones start on the new one")
+            hint = (
+                " — reload the IDE window (Cmd-Shift-P → Reload Window)"
+                if tool == "claude"
+                else ""
+            )
+            # A new chat is not enough: the extension host caches the credential it
+            # read at startup, so the window itself has to come back.
+            note(f"open {tool} sessions keep the old account{hint}")
 
 
 
