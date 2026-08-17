@@ -150,8 +150,9 @@ check("codex compares on its single window",
 
 print("the offline guard makes a forgotten stub fail loudly")
 # a fresh module, so the stubs installed above cannot mask the real function
-pristine = importlib.util.module_from_spec(importlib.util.spec_from_loader("accsw_raw", loader))
-loader.exec_module(pristine)
+raw_loader = importlib.machinery.SourceFileLoader("accsw_raw", str(ACCSW))
+pristine = importlib.util.module_from_spec(importlib.util.spec_from_loader("accsw_raw", raw_loader))
+raw_loader.exec_module(pristine)
 try:
     pristine.http_get_json("https://api.anthropic.com/api/oauth/usage", "not-a-token")
     check_that("refuses to reach the network", False, "it made a call")
