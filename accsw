@@ -1371,7 +1371,7 @@ def cmd_auto(args) -> int:
         for line in apply_switch(name, (tool,), registry):
             print(f"{tool}: {line}")
         print(f"  → {name}, {why}")
-        settle_readers((tool,), args.restart, name, registry)
+        settle_readers((tool,), name, registry)
     return 0
 
 

@@ -377,6 +377,54 @@ check(
     '{"a":1}\n',
 )
 
+print("every internal call matches the function it calls")
+# This shipped: a parameter was removed and one call site kept passing it, so the
+# crash waited for a machine that reached that branch.
+import ast as _ast
+
+_tree = _ast.parse(ACCSW.read_text())
+_defs = {}
+for _node in _ast.walk(_tree):
+    if isinstance(_node, _ast.FunctionDef):
+        _a = _node.args
+        _defs[_node.name] = (
+            len(_a.args) - len(_a.defaults),
+            len(_a.args),
+            bool(_a.vararg or _a.kwarg),
+        )
+_wrong = []
+for _node in _ast.walk(_tree):
+    if isinstance(_node, _ast.Call) and isinstance(_node.func, _ast.Name):
+        _want = _defs.get(_node.func.id)
+        if not _want or _want[2]:
+            continue
+        _given = len(_node.args) + len(_node.keywords)
+        if not _want[0] <= _given <= _want[1]:
+            _wrong.append(f"line {_node.lineno}: {_node.func.id}() gets {_given}")
+check_that("no call disagrees with its definition", not _wrong, "; ".join(_wrong))
+
+print("every argument a command reads is one argparse sets")
+_set = {"handler"}
+for _node in _ast.walk(_tree):
+    if isinstance(_node, _ast.Call) and isinstance(_node.func, _ast.Attribute):
+        if _node.func.attr == "set_defaults":
+            _set |= {_kw.arg for _kw in _node.keywords}
+        elif _node.func.attr == "add_argument":
+            for _arg in _node.args:
+                if isinstance(_arg, _ast.Constant):
+                    _set.add(_arg.value.lstrip("-").replace("-", "_"))
+            for _kw in _node.keywords:
+                if _kw.arg == "dest" and isinstance(_kw.value, _ast.Constant):
+                    _set.add(_kw.value.value)
+_read = {
+    _node.attr
+    for _node in _ast.walk(_tree)
+    if isinstance(_node, _ast.Attribute)
+    and isinstance(_node.value, _ast.Name)
+    and _node.value.id == "args"
+}
+check_that("no command reads an argument nothing sets", not (_read - _set), str(sorted(_read - _set)))
+
 passed = sum(results)
 print(f"\n{passed}/{len(results)} checks passed")
 sys.exit(0 if passed == len(results) else 1)
