@@ -325,12 +325,12 @@ check("a just-reset window says so", accsw.quota_lines([("7d", 90.0, None)], Fal
 
 print("profiles are named after the account, and a name is never stolen")
 check("simple local part", accsw.slugify("developer"), "developer")
-check("dots and plus become dashes", accsw.slugify("stan.andujar+work"), "stan-andujar-work")
+check("dots and plus become dashes", accsw.slugify("first.last+work"), "first-last-work")
 check("collapses runs and trims", accsw.slugify("--Stan__Test--"), "stan-test")
 
 empty = {"profiles": {}, "active": {}}
 check("named from the local part",
-      accsw.name_for("developer@elizalabs.ai", "claude", empty), "developer")
+      accsw.name_for("you@work.example", "claude", empty), "you")
 
 taken = {"profiles": {"stan": {"claude": {"email": "stan@gmail.com"}}}, "active": {}}
 check("a name held by another account is qualified by domain",

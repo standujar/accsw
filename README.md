@@ -5,8 +5,8 @@ has quota left — across the CLIs, the IDE extensions and the desktop apps — 
 
 ```
 $ accsw
-claude: shawgotbags2 — Fable at 63% left
-codex: staying on stan — 7d at 41% left
+claude: work — Fable at 63% left
+codex: staying on personal — 7d at 41% left
 ```
 
 Run it whenever. If you are already on the best account it does nothing at all.
