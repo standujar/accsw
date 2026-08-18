@@ -39,7 +39,7 @@ To run one tool on one account, name it — by alias or by address, whichever yo
 accsw codex work                 run codex on the work account
 accsw codex stan@work.example    same account, named the other way
 accsw codex                      run codex on whichever has the most left
-accsw claude perso -- --resume   anything after the name goes to the tool
+accsw claude perso --resume      extra arguments go to the tool, not to accsw
 ```
 
 A prefix is enough while it is unambiguous. An ambiguous one lists the candidates instead of
