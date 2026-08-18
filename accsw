@@ -1509,6 +1509,76 @@ def cmd_agent(args) -> int:
     return 0
 
 
+def resolve_account(term: str, tool: str, registry: dict) -> str:
+    """The profile a name or an address refers to.
+
+    Either identifies an account, because either is how you think of it: the alias
+    accsw derived, or the address you actually signed in with. Prefixes are accepted
+    while they are unambiguous, and an ambiguous one names its candidates rather than
+    picking for you — switching to the wrong account is not a small mistake here.
+    """
+    holders = {
+        name: (entry[tool].get("email") or "")
+        for name, entry in registry["profiles"].items()
+        if tool in entry
+    }
+    if not holders:
+        raise Fail(f"no account is captured for {tool} — `accsw add {tool}`")
+    wanted = term.lower()
+    for name, email in holders.items():
+        if wanted in (name.lower(), email.lower()):
+            return name
+    near = [
+        name
+        for name, email in holders.items()
+        if name.lower().startswith(wanted)
+        or email.lower().startswith(wanted)
+        or email.split("@")[0].lower() == wanted
+    ]
+    if len(near) == 1:
+        return near[0]
+    if not near:
+        listed = ", ".join(sorted(holders))
+        raise Fail(f"no {tool} account matches {term!r} — have: {listed}")
+    raise Fail(f"{term!r} matches several: {', '.join(sorted(near))}")
+
+
+def cmd_launch(args) -> int:
+    """Put one tool on a named account, then become that tool.
+
+    `accsw codex work` runs codex on the work account; without a name it picks the
+    one with the most left, the same way a bare `accsw` does.
+    """
+    tool = args.tool_name
+    registry = load_state()
+    binary = shutil.which(tool)
+    if binary is None:
+        raise Fail(f"{tool} is not on PATH")
+
+    if args.account:
+        name = resolve_account(args.account, tool, registry)
+        why = "asked for"
+    else:
+        quota, _ = gather_quota(registry, (tool,))
+        save_registry(registry)
+        name, why = best_profile(registry, quota, tool)
+        if name is None:
+            raise Fail(why)
+
+    colour = sys.stdout.isatty()
+    if actually_loaded(tool, registry) == name:
+        note(f"{tool} is already on {name}")
+    else:
+        apply_switch(name, (tool,), registry)
+        save_registry(registry)
+        note(
+            f"{paint(tool, TOOL_COLOUR[tool], colour)} → "
+            f"{paint(name, BOLD, colour)} {paint(f'({why})', DIM, colour)}"
+        )
+        settle_readers((tool,))
+    os.execv(binary, [binary, *args.rest])
+
+
 def cmd_renew(args) -> int:
     """Keep every account alive and change nothing else.
 
@@ -1684,6 +1754,14 @@ def main() -> int:
 
 
 
+
+    for tool in TOOLS:
+        launcher = subparsers.add_parser(
+            tool, help=f"run {tool} on a given account (by alias or address)"
+        )
+        launcher.add_argument("account", nargs="?", help="alias or email; omit for the roomiest")
+        launcher.add_argument("rest", nargs=argparse.REMAINDER, help="passed straight through")
+        launcher.set_defaults(handler=cmd_launch, tool_name=tool)
 
     adding = subparsers.add_parser("add", help="sign in to another account and keep it")
     adding.add_argument("tool_name", choices=TOOLS)

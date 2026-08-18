@@ -33,6 +33,18 @@ accsw add codex
 accsw add claude --email you@example.com   # if the address cannot be read back
 ```
 
+To run one tool on one account, name it — by alias or by address, whichever you think in:
+
+```
+accsw codex work                 run codex on the work account
+accsw codex stan@work.example    same account, named the other way
+accsw codex                      run codex on whichever has the most left
+accsw claude perso -- --resume   anything after the name goes to the tool
+```
+
+A prefix is enough while it is unambiguous. An ambiguous one lists the candidates instead of
+choosing, because switching to the wrong account is not a small mistake here.
+
 ```
 accsw --renew      refresh the idle sign-ins, switch nothing    (repairs a stale account)
 accsw --agent on   run that every 30 min in the background      (--agent off removes it)
