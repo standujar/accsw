@@ -33,13 +33,13 @@ accsw add codex
 accsw add claude --email you@example.com   # if the address cannot be read back
 ```
 
-To run one tool on one account, name it — by alias or by address, whichever you think in:
+To move one tool to one account, name it — by alias or by address, whichever you think in:
 
 ```
-accsw codex work                 run codex on the work account
+accsw codex work                 put Codex on the work account
 accsw codex stan@work.example    same account, named the other way
-accsw codex                      run codex on whichever has the most left
-accsw codex work exec "fix CI"   anything after the account goes to the tool
+accsw codex                      put Codex on whichever has the most left
+accsw claude perso               and the same for Claude
 ```
 
 A prefix is enough while it is unambiguous. An ambiguous one lists the candidates instead of

@@ -1539,26 +1539,18 @@ def resolve_account(term: str, tool: str, registry: dict) -> str:
         return near[0]
     if not near:
         listed = ", ".join(sorted(holders))
-        # Say what the word is for: the first one after the tool is always the
-        # account, so `accsw codex exec …` lands here and the reason is not obvious.
-        raise Fail(
-            f"no {tool} account matches {term!r} — the word after `{tool}` names the "
-            f"account, and anything after that goes to {tool}. Have: {listed}"
-        )
+        raise Fail(f"no {tool} account matches {term!r} — have: {listed}")
     raise Fail(f"{term!r} matches several: {', '.join(sorted(near))}")
 
 
-def cmd_launch(args) -> int:
-    """Put one tool on a named account, then become that tool.
+def cmd_one(args) -> int:
+    """Put one tool on a named account.
 
-    `accsw codex work` runs codex on the work account; without a name it picks the
-    one with the most left, the same way a bare `accsw` does.
+    `accsw codex work` moves Codex to that account; without a name it takes the one
+    with the most left, the same way a bare `accsw` does for both.
     """
     tool = args.tool_name
     registry = load_state()
-    binary = shutil.which(tool)
-    if binary is None:
-        raise Fail(f"{tool} is not on PATH")
 
     if args.account:
         name = resolve_account(args.account, tool, registry)
@@ -1571,16 +1563,19 @@ def cmd_launch(args) -> int:
             raise Fail(why)
 
     colour = sys.stdout.isatty()
-    if actually_loaded(tool, registry) == name:
-        note(f"{tool} is already on {name}")
-    else:
+    marker, verb = (
+        (paint("·", DIM, colour), "already on")
+        if actually_loaded(tool, registry) == name
+        else (paint("→", LOADED, colour), None)
+    )
+    if verb is None:
         apply_switch(name, (tool,), registry)
-        note(
-            f"{paint(tool, TOOL_COLOUR[tool], colour)} → "
-            f"{paint(name, BOLD, colour)} {paint(f'({why})', DIM, colour)}"
-        )
         settle_readers((tool,))
-    os.execv(binary, [binary, *args.rest])
+    print(
+        f"  {paint(f'{tool:<7}', TOOL_COLOUR[tool], colour)} {marker} "
+        f"{name:<26} {paint(why, DIM, colour)}"
+    )
+    return 0
 
 
 def cmd_renew(args) -> int:
@@ -1761,11 +1756,10 @@ def main() -> int:
 
     for tool in TOOLS:
         launcher = subparsers.add_parser(
-            tool, help=f"run {tool} on a given account (by alias or address)"
+            tool, help=f"move {tool} to a given account (by alias or address)"
         )
         launcher.add_argument("account", nargs="?", help="alias or email; omit for the roomiest")
-        launcher.add_argument("rest", nargs=argparse.REMAINDER, help="passed straight through")
-        launcher.set_defaults(handler=cmd_launch, tool_name=tool)
+        launcher.set_defaults(handler=cmd_one, tool_name=tool)
 
     adding = subparsers.add_parser("add", help="sign in to another account and keep it")
     adding.add_argument("tool_name", choices=TOOLS)
