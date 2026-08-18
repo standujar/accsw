@@ -190,12 +190,12 @@ check("a spent model alone blocks nothing", accsw.blocking([("Fable", 100.0, Non
 print("what is loaded is read from the slot, never from the record")
 import tempfile as _tmp, pathlib as _pl
 store = _pl.Path(_tmp.mkdtemp())
-accsw.CODEX_VAULT = store / "codex"
-accsw.CODEX_VAULT.mkdir(parents=True)
+accsw.STORE = store
+accsw.DATABASE = store / "accsw.db"
 accsw.CODEX_AUTH = store / "auth.json"
 reg_live = {"profiles": {"one": {"codex": {}}, "two": {"codex": {}}}, "active": {"codex": "one"}}
-(accsw.CODEX_VAULT / "one.json").write_text('{"tokens": {"id_token": "a"}}')
-(accsw.CODEX_VAULT / "two.json").write_text('{"tokens": {"id_token": "b"}}')
+accsw.park_blob("codex", "one", '{"tokens": {"id_token": "a"}}')
+accsw.park_blob("codex", "two", '{"tokens": {"id_token": "b"}}')
 check("an empty slot loads nothing, whatever the record says",
       accsw.actually_loaded("codex", reg_live), None)
 accsw.CODEX_AUTH.write_text('{"tokens": {"id_token": "b"}}')
@@ -380,16 +380,16 @@ check(
 print("idle accounts are renewed, the loaded one is left to its owner")
 import tempfile as _tf, pathlib as _pl
 _store = _pl.Path(_tf.mkdtemp())
-accsw.CODEX_VAULT = _store / "codex"
-accsw.CODEX_VAULT.mkdir(parents=True)
+accsw.STORE = _store
+accsw.DATABASE = _store / "accsw.db"
 _stale = '{"tokens": {"id_token": "h.%s.s", "refresh_token": "r"}}'
 import base64 as _b, json as _j, time as _t
 def _tok(seconds):
     body = _b.urlsafe_b64encode(_j.dumps({"exp": _t.time() + seconds, "email": "a@b.c"}).encode()).decode().rstrip("=")
     return _j.dumps({"tokens": {"id_token": f"h.{body}.s", "refresh_token": "r"}})
-(accsw.CODEX_VAULT / "idle.json").write_text(_tok(60))      # about to expire
-(accsw.CODEX_VAULT / "loaded.json").write_text(_tok(60))    # same, but in use
-(accsw.CODEX_VAULT / "fine.json").write_text(_tok(7200))    # plenty of time
+accsw.park_blob("codex", "idle", _tok(60))      # about to expire
+accsw.park_blob("codex", "loaded", _tok(60))    # same, but in use
+accsw.park_blob("codex", "fine", _tok(7200))    # plenty of time
 _seen = []
 accsw.REFRESH = {"codex": lambda blob: (_seen.append(blob) or _tok(3600)), "claude": lambda blob: None}
 _reg = {"profiles": {n: {"codex": {"email": "a@b.c"}} for n in ("idle", "loaded", "fine")},
@@ -399,14 +399,31 @@ check("the idle one is renewed", _done, ["idle/codex"])
 check("the loaded one is untouched", "loaded" in str(_done), False)
 check("and one with time left is left alone", len(_seen), 1)
 check("the renewal is written to the locker",
-      accsw.codex_token_expiry((accsw.CODEX_VAULT / "idle.json").read_text()) > 3000, True)
+      accsw.codex_token_expiry(accsw.parked_blob("codex", "idle")) > 3000, True)
 
 print("a refusal marks the account instead of retrying forever")
 accsw.REFRESH = {"codex": lambda blob: None, "claude": lambda blob: None}
-(accsw.CODEX_VAULT / "idle.json").write_text(_tok(60))
+accsw.park_blob("codex", "idle", _tok(60))
 _reg2 = {"profiles": {"idle": {"codex": {"email": "a@b.c"}}}, "active": {}}
 accsw.renew_parked(_reg2)
 check("flagged", _reg2["profiles"]["idle"]["codex"].get("needs_signin"), True)
+
+print("SQLite owns parked credentials and registry state")
+check("database is private", oct(accsw.DATABASE.stat().st_mode)[-3:], "600")
+accsw.save_registry(_reg2)
+check("registry round-trips", accsw.load_registry(), _reg2)
+check("credential round-trips", accsw.parked_blob("codex", "idle") is not None, True)
+
+print("SQLite failures use the normal application error path")
+_bad_store = _pl.Path(_tf.mkdtemp())
+accsw.STORE = _bad_store
+accsw.DATABASE = _bad_store / "accsw.db"
+accsw.DATABASE.write_text("not a sqlite database")
+try:
+    accsw.database()
+    check_that("a corrupt database is rejected", False, "it opened")
+except accsw.Fail as error:
+    check_that("a corrupt database is rejected", "database" in str(error), str(error))
 
 print("every internal call matches the function it calls")
 # This shipped: a parameter was removed and one call site kept passing it, so the

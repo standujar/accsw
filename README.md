@@ -163,10 +163,10 @@ it on the new account.
 ## Where things are kept
 
 ```
-~/.config/accsw/registry.json          which accounts exist        (0600)
+~/.config/accsw/accsw.db               accounts and parked credentials (0600)
 ~/.config/accsw/renew.log              what the background agent did
-~/.config/accsw/codex/<account>.json   Codex credentials           (0600)
-keychain accsw-claude-<account>        Claude credentials
+keychain Claude Code-credentials       Claude Code's live credential
+~/.codex/auth.json                     Codex's live credential      (0600)
 ~/Library/LaunchAgents/com.standujar.accsw.plist   the renewal agent, if you kept it
 ```
 
@@ -181,9 +181,10 @@ neighbouring file. And what is loaded is read from the slot itself, never from t
 credential changed from outside gets repaired rather than misreported. Both rules exist because their
 absence destroyed real accounts during development.
 
-`security` echoes its arguments when it fails, so no diagnostic that contains a credential is ever
-printed. Every keychain write is read back and compared, and every file is written to a temp file at
-mode 600 and renamed into place.
+The SQLite database is mode 600 inside a mode 700 directory. SQLite commits parked credential and
+registry changes transactionally. `security` echoes its arguments when it fails, so no diagnostic
+that contains the live Claude credential is ever printed. Every keychain write is read back and
+compared, and every live file is written to a temp file at mode 600 and renamed into place.
 
 ## Tests
 

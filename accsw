@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """accsw — switch Claude Code and Codex between logged-in accounts, no re-login.
 
-Each account is captured once, then switching is a state swap:
+Each account is captured once into ~/.config/accsw/accsw.db, then switching is a
+state swap:
 
   claude  credential lives in the macOS keychain. The service name is
           "Claude Code-credentials", optionally suffixed with the first 8 hex of
           sha256(CLAUDE_CONFIG_DIR) — so a config dir DOES namespace it, but with
           both CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR unset there
-          is exactly one global item. We park each account's blob in its own
-          keychain item and copy the wanted one back into the canonical one.
+          is exactly one global item. We park each account's blob in SQLite and
+          copy the wanted one back into the canonical keychain item.
           The plaintext .credentials.json backend exists in the binary but is
           unreachable on macOS: a successful keychain write deletes that file.
-  codex   credential is $CODEX_HOME/auth.json, a plain file. We keep one copy
-          per account and write the wanted one back.
+  codex   credential is $CODEX_HOME/auth.json, a plain file. We keep parked
+          copies in SQLite and write the wanted one back.
 
 Sessions, history and project state are deliberately NOT swapped: they are
 shared workspace, not identity, and they weigh ~11 GB.
@@ -25,6 +26,7 @@ import json
 import os
 import pwd
 import shutil
+import sqlite3
 import datetime
 import http.client
 import subprocess
@@ -35,6 +37,8 @@ from pathlib import Path
 
 HOME = Path.home()
 STORE = Path(os.environ.get("ACCSW_HOME", HOME / ".config" / "accsw"))
+DATABASE = STORE / "accsw.db"
+# Legacy locations, read once by migrate_legacy_storage().
 REGISTRY = STORE / "registry.json"
 CODEX_VAULT = STORE / "codex"
 
@@ -193,6 +197,75 @@ def profile_service(profile: str) -> str:
     return f"accsw-claude-{profile}"
 
 
+def database() -> sqlite3.Connection:
+    connection = None
+    try:
+        STORE.mkdir(parents=True, exist_ok=True)
+        STORE.chmod(0o700)
+        connection = sqlite3.connect(DATABASE)
+        os.chmod(DATABASE, 0o600)
+        # DELETE journaling keeps the credential store to one persistent file; WAL
+        # would create sidecar files whose permissions and backup semantics also need
+        # to be treated as secrets.
+        connection.execute("PRAGMA journal_mode = DELETE")
+        connection.execute("PRAGMA synchronous = FULL")
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS credentials (
+                   profile TEXT NOT NULL,
+                   tool TEXT NOT NULL CHECK (tool IN ('claude', 'codex')),
+                   blob TEXT NOT NULL,
+                   PRIMARY KEY (profile, tool)
+               )"""
+        )
+        return connection
+    except sqlite3.Error as error:
+        if connection is not None:
+            connection.close()
+        raise Fail(f"database {DATABASE}: {error}") from error
+
+
+def migrate_legacy_storage(registry: dict) -> None:
+    """Move the old JSON/keychain vaults into SQLite, then remove originals.
+
+    Migration is idempotent: an existing database row always wins, so retrying
+    after an interruption cannot overwrite a newer credential.
+    """
+    with database() as connection:
+        for profile, entry in registry.get("profiles", {}).items():
+            for tool in TOOLS:
+                if tool not in entry:
+                    continue
+                if tool == "claude":
+                    blob = keychain_read(profile_service(profile))
+                else:
+                    blob = read_file(CODEX_VAULT / f"{profile}.json")
+                if blob is not None:
+                    connection.execute(
+                        "INSERT OR IGNORE INTO credentials(profile, tool, blob) VALUES (?, ?, ?)",
+                        (profile, tool, blob),
+                    )
+        connection.execute(
+            "INSERT OR IGNORE INTO state(key, value) VALUES ('registry', ?)",
+            (json.dumps(registry),),
+        )
+
+    # Delete sources only after the committed database contains every available row.
+    for profile, entry in registry.get("profiles", {}).items():
+        if "claude" in entry:
+            keychain_delete(profile_service(profile))
+        if "codex" in entry:
+            (CODEX_VAULT / f"{profile}.json").unlink(missing_ok=True)
+    if CODEX_VAULT.is_dir():
+        try:
+            CODEX_VAULT.rmdir()
+        except OSError:
+            pass
+    REGISTRY.unlink(missing_ok=True)
+
+
 def read_json(path: Path) -> dict:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -203,15 +276,21 @@ def read_json(path: Path) -> dict:
 
 
 def load_registry() -> dict:
-    if not REGISTRY.is_file():
-        return {"profiles": {}, "active": {}}
-    return read_json(REGISTRY)
+    if REGISTRY.is_file():
+        legacy = read_json(REGISTRY)
+        migrate_legacy_storage(legacy)
+    with database() as connection:
+        row = connection.execute("SELECT value FROM state WHERE key = 'registry'").fetchone()
+    return json.loads(row[0]) if row else {"profiles": {}, "active": {}}
 
 
 def save_registry(registry: dict) -> None:
-    STORE.mkdir(parents=True, exist_ok=True)
-    STORE.chmod(0o700)
-    atomic_write(REGISTRY, json.dumps(registry, indent=2) + "\n")
+    with database() as connection:
+        connection.execute(
+            "INSERT INTO state(key, value) VALUES ('registry', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (json.dumps(registry),),
+        )
 
 
 def running(tool: str) -> list[int]:
@@ -285,9 +364,11 @@ def live_blob(tool: str) -> str | None:
 
 
 def parked_blob(tool: str, profile: str) -> str | None:
-    if tool == "claude":
-        return keychain_read(profile_service(profile))
-    return read_file(CODEX_VAULT / f"{profile}.json")
+    with database() as connection:
+        row = connection.execute(
+            "SELECT blob FROM credentials WHERE profile = ? AND tool = ?", (profile, tool)
+        ).fetchone()
+    return row[0] if row else None
 
 
 def credential_owner(tool: str, blob: str) -> str | None:
@@ -385,7 +466,7 @@ def capture_claude(profile: str, registry: dict) -> str:
         )
     account = claude_oauth_identity(claude_access_token(secret))
     email = account["emailAddress"]
-    keychain_write(profile_service(profile), secret, f"accsw claude — {profile}")
+    park_blob("claude", profile, secret)
     entry = registry["profiles"].setdefault(profile, {})
     entry["claude"] = {"email": email, "oauthAccount": account}
     registry.setdefault("active", {})["claude"] = profile
@@ -396,9 +477,7 @@ def capture_codex(profile: str, registry: dict) -> str:
     if not CODEX_AUTH.is_file():
         raise Fail(f"no Codex credential at {CODEX_AUTH} — run `codex login` first")
     email = credential_owner("codex", CODEX_AUTH.read_text(encoding="utf-8"))
-    CODEX_VAULT.mkdir(parents=True, exist_ok=True)
-    CODEX_VAULT.chmod(0o700)
-    atomic_write(CODEX_VAULT / f"{profile}.json", CODEX_AUTH.read_text(encoding="utf-8"))
+    park_blob("codex", profile, CODEX_AUTH.read_text(encoding="utf-8"))
     entry = registry["profiles"].setdefault(profile, {})
     entry["codex"] = {"email": email}
     registry.setdefault("active", {})["codex"] = profile
@@ -418,10 +497,10 @@ def preflight_claude(profile: str, registry: dict) -> None:
             f"profile {profile!r} was captured without its identity — "
             f"sign it in again with `accsw add claude`"
         )
-    secret = keychain_read(profile_service(profile))
+    secret = parked_blob("claude", profile)
     if secret is None:
         raise Fail(
-            f"profile {profile!r} lost its keychain item — `accsw add claude` will restore it"
+            f"profile {profile!r} lost its stored credential — `accsw add claude` will restore it"
         )
     json.loads(secret)
     if not CLAUDE_STATE.is_file():
@@ -431,15 +510,15 @@ def preflight_claude(profile: str, registry: dict) -> None:
 
 def preflight_codex(profile: str, registry: dict) -> None:
     stored = registry["profiles"].get(profile, {}).get("codex")
-    source = CODEX_VAULT / f"{profile}.json"
-    if stored is None or not source.is_file():
+    blob = parked_blob("codex", profile)
+    if stored is None or blob is None:
         raise Fail(f"profile {profile!r} has no captured Codex account")
-    read_json(source)
+    json.loads(blob)
 
 
 def restore_claude(profile: str, registry: dict) -> str:
     stored = registry["profiles"][profile]["claude"]
-    secret = keychain_read(profile_service(profile))
+    secret = parked_blob("claude", profile)
     left = claude_token_expiry(secret)
     if left is not None and left <= 300:
         renewed = refresh_claude(secret)
@@ -450,7 +529,7 @@ def restore_claude(profile: str, registry: dict) -> str:
                 f"{profile}'s Claude sign-in was refused — `accsw add claude` will sign it in again"
             )
         # Both copies together: the refresh token that produced this is now spent.
-        keychain_write(profile_service(profile), renewed, f"accsw claude — {profile}")
+        park_blob("claude", profile, renewed)
         secret = renewed
         note(f"renewed {profile}'s Claude sign-in")
     keychain_write(CLAUDE_KEYCHAIN_SERVICE, secret, "Claude Code")
@@ -607,8 +686,7 @@ def codex_token_expiry(blob: str) -> float | None:
 
 def restore_codex(profile: str, registry: dict) -> str:
     stored = registry["profiles"][profile]["codex"]
-    source = CODEX_VAULT / f"{profile}.json"
-    blob = source.read_text(encoding="utf-8")
+    blob = parked_blob("codex", profile)
     left = codex_token_expiry(blob)
     if left is not None and left <= 300:
         renewed = refresh_codex(blob)
@@ -623,7 +701,7 @@ def restore_codex(profile: str, registry: dict) -> str:
         else:
             # Both copies, together: the old refresh token is dead the moment this
             # succeeds, so leaving either one behind strands the account.
-            atomic_write(source, renewed)
+            park_blob("codex", profile, renewed)
             blob = renewed
             note(f"renewed {profile}'s Codex sign-in")
     atomic_write(CODEX_AUTH, blob)
@@ -722,10 +800,12 @@ def renew_parked(registry: dict) -> list[str]:
 
 
 def park_blob(tool: str, profile: str, blob: str) -> None:
-    if tool == "claude":
-        keychain_write(profile_service(profile), blob, f"accsw claude — {profile}")
-    else:
-        atomic_write(CODEX_VAULT / f"{profile}.json", blob)
+    with database() as connection:
+        connection.execute(
+            "INSERT INTO credentials(profile, tool, blob) VALUES (?, ?, ?) "
+            "ON CONFLICT(profile, tool) DO UPDATE SET blob = excluded.blob",
+            (profile, tool, blob),
+        )
 
 
 def load_state(absorb: bool = True) -> dict:
@@ -835,9 +915,8 @@ def read_file(path: Path) -> str | None:
 
 
 def profile_token(tool: str, profile: str) -> str:
-    if tool == "claude":
-        return claude_access_token(keychain_read(profile_service(profile)))
-    return codex_access_token(read_file(CODEX_VAULT / f"{profile}.json"))
+    blob = parked_blob(tool, profile)
+    return claude_access_token(blob) if tool == "claude" else codex_access_token(blob)
 
 
 
@@ -1630,12 +1709,10 @@ def complete_add(args, tool: str, registry: dict, workspace: Path) -> int:
     name = name_for(email, tool, registry)
     registry["profiles"].setdefault(name, {}).pop(tool, None)
     if tool == "codex":
-        CODEX_VAULT.mkdir(parents=True, exist_ok=True)
-        CODEX_VAULT.chmod(0o700)
-        atomic_write(CODEX_VAULT / f"{name}.json", blob)
+        park_blob("codex", name, blob)
         registry["profiles"].setdefault(name, {})["codex"] = {"email": email}
     else:
-        keychain_write(profile_service(name), blob, f"accsw claude — {name}")
+        park_blob("claude", name, blob)
         registry["profiles"].setdefault(name, {})["claude"] = {
             "email": email,
             "oauthAccount": account,
@@ -1699,7 +1776,7 @@ def main() -> int:
     except Fail as error:
         print(f"accsw: {error}", file=sys.stderr)
         return 1
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, json.JSONDecodeError, sqlite3.Error) as error:
         print(f"accsw: {type(error).__name__}: {error}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
