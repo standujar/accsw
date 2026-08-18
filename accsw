@@ -476,8 +476,12 @@ def token_grant(request) -> dict:
         with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
             granted = json.loads(response.read())
     except urllib.error.HTTPError as error:
-        if error.code in (400, 401, 403):
+        if error.code in (400, 401):
             return {}
+        if error.code == 403:
+            # Cloudflare, not the OAuth server. Retiring an account over a firewall
+            # is exactly the mistake this distinction exists to prevent.
+            raise Unreachable("blocked before reaching the token endpoint (403)")
         raise Unreachable(f"token endpoint returned {error.code}")
     except urllib.error.URLError as error:
         raise Unreachable(f"token endpoint unreachable ({error.reason})")
@@ -491,6 +495,10 @@ def token_grant(request) -> dict:
 
 
 CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+# Without one, Cloudflare answers 403 "error code: 1010" before the OAuth server is
+# ever reached — and a firewall block read as a refusal is how healthy accounts got
+# marked dead. Identifying ourselves honestly as what we are.
+USER_AGENT = "accsw (github.com/standujar/accsw)"
 CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
 
@@ -523,7 +531,13 @@ def refresh_claude(blob: str) -> str | None:
         }
     ).encode()
     request = urllib.request.Request(
-        CLAUDE_TOKEN_URL, data=body, headers={"Content-Type": "application/json"}
+        CLAUDE_TOKEN_URL,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": USER_AGENT,
+        },
     )
     granted = token_grant(request)
     if not granted.get("access_token"):
@@ -570,7 +584,10 @@ def refresh_codex(blob: str) -> str | None:
     request = urllib.request.Request(
         CODEX_TOKEN_URL,
         data=body,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": USER_AGENT,
+        },
     )
     granted = token_grant(request)
     if not granted.get("access_token") or not granted.get("id_token"):
