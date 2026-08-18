@@ -408,6 +408,31 @@ _reg2 = {"profiles": {"idle": {"codex": {"email": "a@b.c"}}}, "active": {}}
 accsw.renew_parked(_reg2)
 check("flagged", _reg2["profiles"]["idle"]["codex"].get("needs_signin"), True)
 
+print("an account is found by its alias or by its address, either way")
+book = {"profiles": {
+    "work": {"codex": {"email": "stan@work.example"}},
+    "perso": {"codex": {"email": "stan@perso.example"}},
+    "shaw": {"claude": {"email": "shaw@example.com"}},
+}, "active": {}}
+check("by alias", accsw.resolve_account("work", "codex", book), "work")
+check("by full address", accsw.resolve_account("stan@perso.example", "codex", book), "perso")
+check("case does not matter", accsw.resolve_account("WORK", "codex", book), "work")
+check("an unambiguous prefix is enough", accsw.resolve_account("per", "codex", book), "perso")
+check("only accounts that have that tool", accsw.resolve_account("shaw", "claude", book), "shaw")
+
+print("an ambiguous or unknown name refuses instead of guessing")
+for term, expect in (("stan@", "several"), ("nobody", "no codex account matches")):
+    try:
+        accsw.resolve_account(term, "codex", book)
+        check_that(f"{term!r} refuses", False, "it picked one")
+    except accsw.Fail as error:
+        check_that(f"{term!r} refuses", expect in str(error), str(error))
+try:
+    accsw.resolve_account("shaw", "codex", book)
+    check_that("a claude-only account is not a codex answer", False, "it matched")
+except accsw.Fail as error:
+    check_that("a claude-only account is not a codex answer", "matches" in str(error), str(error))
+
 print("every internal call matches the function it calls")
 # This shipped: a parameter was removed and one call site kept passing it, so the
 # crash waited for a machine that reached that branch.
