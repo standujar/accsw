@@ -1539,7 +1539,12 @@ def resolve_account(term: str, tool: str, registry: dict) -> str:
         return near[0]
     if not near:
         listed = ", ".join(sorted(holders))
-        raise Fail(f"no {tool} account matches {term!r} — have: {listed}")
+        # Say what the word is for: the first one after the tool is always the
+        # account, so `accsw codex exec …` lands here and the reason is not obvious.
+        raise Fail(
+            f"no {tool} account matches {term!r} — the word after `{tool}` names the "
+            f"account, and anything after that goes to {tool}. Have: {listed}"
+        )
     raise Fail(f"{term!r} matches several: {', '.join(sorted(near))}")
 
 
@@ -1570,7 +1575,6 @@ def cmd_launch(args) -> int:
         note(f"{tool} is already on {name}")
     else:
         apply_switch(name, (tool,), registry)
-        save_registry(registry)
         note(
             f"{paint(tool, TOOL_COLOUR[tool], colour)} → "
             f"{paint(name, BOLD, colour)} {paint(f'({why})', DIM, colour)}"
